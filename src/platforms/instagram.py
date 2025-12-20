@@ -53,3 +53,35 @@ def upload(video_path: str, caption: str):
             
         set_account_state("instagram", False, err_str)
         return False, err_str
+
+
+def verify_login() -> Tuple[bool, str]:
+    """
+    Lightweight validation used by the UI to confirm credentials/session are still good.
+    """
+    username, password = _credentials()
+    if not username or not password:
+        msg = "Instagram credentials missing."
+        set_account_state("instagram", False, msg)
+        return False, msg
+
+    cl = Client()
+    session_data = get_config(SESSION_KEY)
+    if session_data:
+        try:
+            cl.set_settings(json.loads(session_data))
+        except Exception:
+            logger.warning("Failed to load stored Instagram session.")
+
+    try:
+        cl.login(username, password)
+        set_config(SESSION_KEY, json.dumps(cl.get_settings()))
+        set_account_state("instagram", True, None)
+        return True, f"Session valid for @{username}"
+    except ChallengeRequired:
+        msg = "Instagram 2FA/Challenge required. Log in manually on a phone."
+        set_account_state("instagram", False, msg)
+        return False, msg
+    except Exception as exc:
+        set_account_state("instagram", False, str(exc))
+        return False, str(exc)

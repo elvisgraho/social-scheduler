@@ -54,6 +54,13 @@ def warn_tiktok_session_if_needed() -> None:
     _notify("TikTok session cookie is older than 25 days. Refresh it soon to avoid upload failures.")
 
 
+def _platform_shuffle_enabled() -> bool:
+    try:
+        return bool(int(get_config("platform_shuffle", 1) or 0))
+    except Exception:
+        return True
+
+
 def process_video(video: dict) -> None:
     queue_id = video["id"]
     file_path = video["file_path"]
@@ -91,9 +98,12 @@ def process_video(video: dict) -> None:
     failures = []
     missing_accounts = []
     platforms = get_platforms()
+    platform_items = list(platforms.items())
+    if _platform_shuffle_enabled():
+        random.shuffle(platform_items)
 
     # 4. Process Platforms
-    for key, cfg in platforms.items():
+    for key, cfg in platform_items:
         label = cfg["label"]
         
         # SKIP if already succeeded in a previous attempt

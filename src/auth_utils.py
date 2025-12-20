@@ -74,6 +74,32 @@ def youtube_connected() -> bool:
     return bool(get_youtube_credentials())
 
 
+def verify_youtube_credentials() -> tuple[bool, str]:
+    """
+    Attempt to refresh/validate the stored YouTube credentials.
+    """
+    token_json = get_youtube_credentials()
+    if not token_json:
+        msg = "YouTube account not linked."
+        set_account_state("youtube", False, msg)
+        return False, msg
+    try:
+        info = json.loads(token_json)
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+
+        creds = Credentials.from_authorized_user_info(info)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            set_config(YOUTUBE_KEY, creds.to_json())
+        set_account_state("youtube", True, None)
+        return True, "YouTube token is valid."
+    except Exception as exc:
+        msg = f"Credential error: {exc}"
+        set_account_state("youtube", False, msg)
+        return False, msg
+
+
 def save_google_client_config(raw_json: str) -> Tuple[bool, str]:
     try:
         data = json.loads(raw_json)

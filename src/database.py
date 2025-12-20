@@ -1,7 +1,7 @@
 import json
 import os
 import sqlite3
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 DB_FILE = "data/scheduler.db"
 
@@ -242,6 +242,50 @@ def delete_from_queue(queue_id: int) -> None:
     conn.execute("DELETE FROM queue WHERE id = ?", (queue_id,))
     conn.commit()
     conn.close()
+
+
+def get_uploaded_items(limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Return the oldest uploaded items first so cleanup can prune them.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT * FROM queue
+        WHERE status = 'uploaded'
+        ORDER BY
+            CASE WHEN scheduled_for IS NULL THEN 1 ELSE 0 END,
+            scheduled_for ASC,
+            created_at ASC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def cleanup_uploaded(count: int) -> Tuple[int, int]:
+    """
+    Delete the oldest uploaded items and remove their files from disk.
+    Returns (items_deleted, bytes_freed).
+    """
+    import os
+
+    items = get_uploaded_items(count)
+    deleted = 0
+    freed_bytes = 0
+    for row in items:
+        file_path = row.get("file_path")
+        if file_path and os.path.exists(file_path):
+            try:
+                freed_bytes += os.path.getsize(file_path)
+                os.remove(file_path)
+            except Exception:
+                pass
+        delete_from_queue(row["id"])
+        deleted += 1
+    return deleted, freed_bytes
 
 
 def set_account_state(platform: str, connected: bool, last_error: Optional[str]) -> None:

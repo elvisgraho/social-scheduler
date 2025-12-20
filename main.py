@@ -1,4 +1,6 @@
 import json
+import random
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -13,6 +15,7 @@ from src.auth_utils import (
     get_google_client_config,
     has_google_client_config,
     save_google_client_config,
+    verify_youtube_credentials,
     youtube_connected,
 )
 from src.database import (
@@ -31,11 +34,12 @@ from src.platform_registry import all_platform_statuses, get_platforms
 from src.platforms import tiktok as tiktok_platform
 from src.scheduling import get_schedule, human_readable_schedule, next_slots, save_schedule
 
-st.set_page_config(page_title="Social Scheduler", page_icon="SS", layout="wide")
+st.set_page_config(page_title="Social Scheduler", page_icon="SS", layout="centered")
 init_db()
 logger = init_logging("ui")
 logger.info("Streamlit UI started.")
 
+DATA_DIR = Path("data")
 UPLOAD_DIR = Path("data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 logger.debug("Uploads directory ready at %s", UPLOAD_DIR)
@@ -81,15 +85,23 @@ def _queue_dataframe(queue_rows):
             }
         )
     if not data:
-        return pd.DataFrame(columns=["ID", "File", "Scheduled", "Status", "Attempts", "Last Error"])
+        return pd.DataFrame(
+            columns=["ID", "File", "Scheduled", "Status", "Attempts", "Last Error"]
+        )
     return pd.DataFrame(data)
 
 
-def _save_files_to_queue(files: List, slots: List[datetime]):
+def _save_files_to_queue(files: List, slots: List[datetime], shuffle_order: bool):
     title = get_config("global_title", "Daily Short")
     desc = get_config("global_desc", "#shorts")
-    for uploaded, slot in zip(files, slots):
-        destination = UPLOAD_DIR / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uploaded.name}"
+    paired = list(zip(files, slots))
+    if shuffle_order:
+        random.shuffle(paired)
+    for uploaded, slot in paired:
+        destination = (
+            UPLOAD_DIR
+            / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uploaded.name}"
+        )
         with destination.open("wb") as f:
             f.write(uploaded.getbuffer())
         add_to_queue(str(destination), slot.isoformat(), title, desc)
@@ -157,6 +169,19 @@ def _platform_status_badge():
             col.caption(error)
 
 
+def _storage_summary():
+    try:
+        usage = shutil.disk_usage(DATA_DIR)
+        used_gb = usage.used / (1024**3)
+        total_gb = usage.total / (1024**3)
+        free_gb = usage.free / (1024**3)
+        percent = (usage.used / usage.total) * 100 if usage.total else 0
+        return used_gb, free_gb, total_gb, percent
+    except Exception as exc:
+        logger.warning("Unable to read disk usage: %s", exc)
+        return None, None, None, None
+
+
 st.title("Social Scheduler")
 st.caption("Upload shorts once and let the Raspberry Pi worker post them everywhere.")
 
@@ -180,6 +205,22 @@ with tabs[0]:
 
     st.write(f"**Schedule:** {schedule_description}")
 
+    used_gb, free_gb, total_gb, percent = _storage_summary()
+    if total_gb:
+        st.progress(percent / 100.0, text=f"Storage used: {used_gb:.1f} / {total_gb:.1f} GB ({percent:.1f}%)")
+        storage_cols = st.columns(2)
+        storage_cols[0].caption(f"Free: {free_gb:.1f} GB")
+        with storage_cols[1]:
+            if st.button("Clean oldest uploads", key="clean_uploaded"):
+                from src.database import cleanup_uploaded
+
+                deleted, freed = cleanup_uploaded(20)
+                logger.info("Cleanup triggered via UI. Removed %s items, freed %s bytes.", deleted, freed)
+                if deleted:
+                    st.success(f"Deleted {deleted} uploaded items, freed {freed/ (1024**2):.1f} MB.")
+                else:
+                    st.info("No uploaded items to clean.")
+
     next_up = next(
         (row for row in queue_rows if row.get("scheduled_for") and row["status"] in ("pending", "retry")),
         None,
@@ -198,6 +239,15 @@ with tabs[1]:
     uploaded_files = st.file_uploader(
         "Drop multiple shorts (mp4/mov)", type=["mp4", "mov", "m4v"], accept_multiple_files=True
     )
+    st.caption("Tip: Upload 7–10 at once with one shared title/description.")
+    shuffle_order = st.checkbox(
+        "Shuffle video order before scheduling (randomize which video goes first)", value=True
+    )
+    per_platform_shuffle = st.checkbox(
+        "Randomize platform order + add 10-30s gap between platforms", value=bool(int(get_config("platform_shuffle", 1) or 0))
+    )
+    set_config("platform_shuffle", int(per_platform_shuffle))
+
     if uploaded_files:
         start = _schedule_start(queue_rows)
         slots = next_slots(len(uploaded_files), start=start)
@@ -214,9 +264,12 @@ with tabs[1]:
             readable_slots = "\n".join(slot.strftime("%b %d %H:%M %Z") for slot in slots)
             st.write("These videos will be scheduled for:")
             st.code(readable_slots)
+            preview_cols = st.columns(min(3, len(uploaded_files)))
+            for idx, uploaded in enumerate(uploaded_files[:3]):
+                preview_cols[idx % len(preview_cols)].video(uploaded)
             if st.button("Add videos to queue", width="stretch"):
                 logger.info("Queuing %s new videos.", len(uploaded_files))
-                _save_files_to_queue(uploaded_files, slots)
+                _save_files_to_queue(uploaded_files, slots, shuffle_order)
                 st.success(f"Queued {len(slots)} videos.")
                 st.rerun()
 
@@ -230,6 +283,8 @@ with tabs[1]:
             with st.expander(f"#{row['id']} - {Path(row['file_path']).name}"):
                 st.write(f"Scheduled: {_format_datetime(row.get('scheduled_for'))}")
                 st.write(f"Status: {row.get('status')} - Attempts: {row.get('attempts', 0)}")
+                if Path(row["file_path"]).exists():
+                    st.video(str(row["file_path"]), format="video/mp4")
                 if row.get("last_error"):
                     st.error(row["last_error"])
                 logs = row.get("platform_logs")
@@ -313,12 +368,19 @@ with tabs[2]:
                     ok, message = finish_google_auth(yt_code.strip())
                     if ok:
                         logger.info("YouTube account linked.")
-                        st.success(message)
-                        st.rerun()
-                    else:
-                        st.error(message)
-                        logger.warning("YouTube link failed: %s", message)
-    if yt_connected and st.button("Disconnect YouTube"):
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+                logger.warning("YouTube link failed: %s", message)
+    yt_actions = st.columns(2)
+    if yt_actions[0].button("Verify YouTube token"):
+        ok, msg = verify_youtube_credentials()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+    if yt_connected and yt_actions[1].button("Disconnect YouTube"):
         set_config(YOUTUBE_KEY, "")
         set_account_state("youtube", False, "Disconnected by user")
         logger.info("YouTube account disconnected by user.")
@@ -334,6 +396,15 @@ with tabs[2]:
             set_account_state("instagram", bool(ig_user and ig_pass), None)
             logger.info("Instagram credentials updated (user=%s, password_set=%s).", ig_user or "<blank>", bool(ig_pass))
             st.success("Instagram credentials saved.")
+    ig_actions = st.columns(2)
+    if ig_actions[0].button("Verify Instagram login now"):
+        from src.platforms import instagram as instagram_platform
+
+        ok, msg = instagram_platform.verify_login()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
 
     st.markdown("#### TikTok")
     tt_status = tiktok_platform.session_status()
