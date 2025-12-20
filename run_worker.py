@@ -12,6 +12,7 @@ from src.database import (
     get_due_queue,
     increment_attempts,
     init_db,
+    set_json_config,
     reschedule_queue_item,
     set_config,
     update_queue_status,
@@ -26,6 +27,8 @@ logger = init_logging("worker")
 from src.logging_utils import log_once
 MAX_ATTEMPTS = 3
 WORKER_BUSY = False
+PAUSE_KEY = "queue_paused"
+FORCE_KEY = "queue_force_run"
 
 
 def _now_with_timezone() -> datetime:
@@ -67,6 +70,11 @@ def process_video(video: dict) -> None:
     queue_id = video["id"]
     file_path = video["file_path"]
     
+    paused = bool(int(get_config(PAUSE_KEY, 0) or 0))
+    if paused:
+        logger.info("Queue is paused. Skipping processing for #%s.", queue_id)
+        return
+
     # 1. Parse previous logs to prevent double-uploading on retry
     raw_logs = video.get("platform_logs")
     previous_logs = {}
@@ -144,18 +152,19 @@ def process_video(video: dict) -> None:
 
     # 5. Determine Final Status
     # If there are failures, we retry. BUT we must ensure we don't retry forever.
-    if failures or missing_accounts:
-        status = "retry" if attempts < MAX_ATTEMPTS else "failed"
-        
-        # Consolidate error messages
-        error_msg = "; ".join(failures) if failures else "Awaiting account connections."
-        
-        update_queue_status(queue_id, status, error_msg, current_logs)
-        
-        if status == "retry":
-            # Smart Reschedule: Ensure we don't retry immediately.
-            # Look for next slot, but force at least 1 hour delay for retries.
-            future_slots = next_slots(1, start=_now_with_timezone())
+        if failures or missing_accounts:
+            status = "retry" if attempts < MAX_ATTEMPTS else "failed"
+            
+            # Consolidate error messages
+            error_msg = "; ".join(failures) if failures else "Awaiting account connections."
+            
+            update_queue_status(queue_id, status, error_msg, current_logs)
+            set_config(PAUSE_KEY, 1)
+            
+            if status == "retry":
+                # Smart Reschedule: Ensure we don't retry immediately.
+                # Look for next slot, but force at least 1 hour delay for retries.
+                future_slots = next_slots(1, start=_now_with_timezone())
             
             retry_time = None
             if future_slots:
@@ -174,7 +183,7 @@ def process_video(video: dict) -> None:
                         queue_id, attempts, MAX_ATTEMPTS, retry_time.isoformat())
             
         if failures:
-            _notify(f"Queue #{queue_id} partial failure: {'; '.join(failures)}")
+            _notify(f"Queue #{queue_id} partial failure: {'; '.join(failures)}. Queue paused.")
         return
 
     # Success
@@ -188,11 +197,24 @@ def check_and_post():
         logger.debug("Worker is busy, skipping schedule tick.")
         return
 
+    paused = bool(int(get_config(PAUSE_KEY, 0) or 0))
+    force = bool(int(get_config(FORCE_KEY, 0) or 0))
+    if paused and not force:
+        logger.debug("Queue paused; skipping tick.")
+        return
+
     WORKER_BUSY = True
     try:
         warn_tiktok_session_if_needed()
         now = _now_with_timezone()
         due = get_due_queue(now.isoformat())
+        if not due and force:
+            # If forcing and nothing is strictly due, pick the earliest pending/retry
+            from src.database import get_queue
+            all_items = get_queue(limit=1)
+            due = all_items if all_items else []
+        if force:
+            set_config(FORCE_KEY, 0)
         
         if not due:
             logger.debug("No videos due at %s", now.isoformat())

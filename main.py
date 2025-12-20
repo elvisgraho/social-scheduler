@@ -22,11 +22,13 @@ from src.database import (
     add_to_queue,
     delete_from_queue,
     get_config,
+    get_json_config,
     get_queue,
     init_db,
     reschedule_queue_item,
-    set_account_state,
     set_config,
+    set_json_config,
+    set_account_state,
 )
 from src.logging_utils import get_log_file_path, init_logging, tail_log, log_once
 from src.notifier import send_telegram_message, telegram_enabled
@@ -198,10 +200,12 @@ with tabs[0]:
     pending = sum(1 for row in queue_rows if row["status"] in ("pending", "retry"))
     processing = sum(1 for row in queue_rows if row["status"] == "processing")
     uploaded = sum(1 for row in queue_rows if row["status"] == "uploaded")
-    metrics = st.columns(3)
+    metrics = st.columns(4)
     metrics[0].metric("Pending", pending)
     metrics[1].metric("Processing", processing)
     metrics[2].metric("Done (recent)", uploaded)
+    paused = bool(int(get_config("queue_paused", 0) or 0))
+    metrics[3].metric("Queue", "Paused" if paused else "Live")
 
     st.write(f"**Schedule:** {schedule_description}")
 
@@ -236,6 +240,23 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("Upload & Queue")
+    paused = bool(int(get_config("queue_paused", 0) or 0))
+    pause_col, resume_col, force_col = st.columns(3)
+    if pause_col.button("Pause uploads"):
+        set_config("queue_paused", 1)
+        logger.warning("Queue paused via UI.")
+        st.info("Uploads paused. Nothing will be posted until resumed.")
+        st.rerun()
+    if resume_col.button("Resume uploads"):
+        set_config("queue_paused", 0)
+        logger.info("Queue resumed via UI.")
+        st.success("Uploads resumed. Next due item will post at its scheduled slot.")
+        st.rerun()
+    if force_col.button("Upload next now"):
+        set_config("queue_force_run", 1)
+        logger.info("Force upload requested via UI.")
+        st.success("Next due item will be processed immediately by the worker.")
+
     uploaded_files = st.file_uploader(
         "Drop multiple shorts (mp4/mov)", type=["mp4", "mov", "m4v"], accept_multiple_files=True
     )
@@ -324,8 +345,9 @@ with tabs[2]:
     google_config_present = has_google_client_config()
     with st.expander("OAuth client JSON (Desktop app)", expanded=not google_config_present):
         st.caption(
-            "Create an OAuth client for a Desktop application in Google Cloud -> Credentials, "
-            "download the JSON, and paste it below."
+            "Step 1: In Google Cloud Console -> APIs & Services -> Credentials, create OAuth Client ID (Desktop app).\n"
+            "Step 2: Download the JSON.\n"
+            "Step 3: Paste it here and save."
         )
         google_json = st.text_area(
             "Google client JSON",
@@ -355,6 +377,11 @@ with tabs[2]:
     if not google_config_present:
         st.info("Provide Google OAuth client JSON above before linking YouTube.")
     else:
+        st.caption(
+            "Step 4: Click OAuth link and sign in.\n"
+            "Step 5: Copy the verification code Google shows.\n"
+            "Step 6: Paste the code below and finish."
+        )
         auth_url, err = get_google_auth_url()
         if err:
             st.error(err)
@@ -368,11 +395,11 @@ with tabs[2]:
                     ok, message = finish_google_auth(yt_code.strip())
                     if ok:
                         logger.info("YouTube account linked.")
-                st.success(message)
-                st.rerun()
-            else:
-                st.error(message)
-                logger.warning("YouTube link failed: %s", message)
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
+                        logger.warning("YouTube link failed: %s", message)
     yt_actions = st.columns(2)
     if yt_actions[0].button("Verify YouTube token"):
         ok, msg = verify_youtube_credentials()
