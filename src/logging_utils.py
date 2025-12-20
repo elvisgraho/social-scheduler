@@ -4,24 +4,27 @@ from pathlib import Path
 
 LOG_DIR = Path("data/logs")
 LOG_FILE = LOG_DIR / "scheduler.log"
+BASE_LOGGER_NAME = "scheduler"
+
 
 def _ensure_log_dir() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _handler_exists(logger: logging.Logger) -> bool:
-    for handler in logger.handlers:
-        if isinstance(handler, RotatingFileHandler) and handler.baseFilename == str(LOG_FILE):
-            return True
-    return False
-
-
-def init_logging(component_name: str = "app", level: int = logging.INFO) -> logging.Logger:
+def _base_logger(level: int) -> logging.Logger:
+    """
+    Create/return a single base logger with one rotating file handler.
+    Child loggers (scheduler.ui, scheduler.worker, etc.) inherit it without adding handlers.
+    """
     _ensure_log_dir()
-    logger = logging.getLogger()
+    logger = logging.getLogger(BASE_LOGGER_NAME)
     logger.setLevel(level)
 
-    if not _handler_exists(logger):
+    has_handler = any(
+        isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", "") == str(LOG_FILE)
+        for h in logger.handlers
+    )
+    if not has_handler:
         handler = RotatingFileHandler(
             LOG_FILE,
             maxBytes=1_000_000,
@@ -33,8 +36,20 @@ def init_logging(component_name: str = "app", level: int = logging.INFO) -> logg
         )
         logger.addHandler(handler)
 
+    logger.propagate = False  # keep records out of root handlers (e.g., Streamlit defaults)
     logging.captureWarnings(True)
-    component_logger = logging.getLogger(component_name)
+
+    # Keep third-party verbosity reasonable without hiding errors
+    for noisy in ("instagrapi", "urllib3", "selenium"):
+        logging.getLogger(noisy).setLevel(logging.INFO)
+    return logger
+
+
+def init_logging(component_name: str = "app", level: int = logging.INFO) -> logging.Logger:
+    _base_logger(level)
+    component_logger = logging.getLogger(f"{BASE_LOGGER_NAME}.{component_name}")
+    component_logger.setLevel(level)
+    component_logger.propagate = True  # bubble to base logger only
     component_logger.debug("Logging initialized for %s", component_name)
     return component_logger
 

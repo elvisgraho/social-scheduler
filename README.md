@@ -35,7 +35,7 @@ python run_worker.py   # worker (separate shell)
 
 ### Accounts (tokens/cookies)
 - **YouTube**: In **Accounts → Google API Setup**, paste your Desktop OAuth client JSON. Open OAuth, paste the code back, and link. Tokens auto-refresh.
-- **Instagram**: Enter username/password; stored locally.
+- **Instagram** (safer): paste your `sessionid` cookie or instagrapi settings JSON from a trusted device. Username/password is only a fallback and may trigger challenges.
 - **TikTok**: Paste `sessionid` — any of:
   - Raw value: `123...`
   - Cookie header snippet: `sessionid=123...; path=/;`

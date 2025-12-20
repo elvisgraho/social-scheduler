@@ -6,48 +6,121 @@ from src.logging_utils import init_logging
 from src.database import get_config, set_account_state, set_config
 
 SESSION_KEY = "insta_session"
+SESSION_ID_KEY = "insta_sessionid"
 logger = init_logging("instagram")
 
 def _credentials() -> Tuple[str, str]:
     return get_config("insta_user"), get_config("insta_pass")
 
-def upload(video_path: str, caption: str):
+
+def _format_error(exc: Exception) -> str:
+    # instagrapi exceptions sometimes carry response info; surface it.
+    status = getattr(exc, "response", None)
+    if status is not None:
+        code = getattr(status, "status_code", None)
+        text = getattr(status, "text", None)
+        if code or text:
+            details = f"HTTP {code}" if code else "HTTP error"
+            if text:
+                details = f"{details}: {text}"
+            return details
+    return str(exc)
+
+
+def _extract_sessionid(raw: str) -> str:
+    if not raw:
+        return ""
+    raw = raw.strip()
+    # Cookie header style
+    if "sessionid=" in raw and ";" in raw:
+        for part in raw.split(";"):
+            if "sessionid=" in part:
+                return part.split("sessionid=")[-1].strip()
+    # JSON payload from DevTools export
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {}
+        if isinstance(data, dict):
+            if "sessionid" in data:
+                return str(data["sessionid"])
+            cookies = data.get("cookies")
+            if isinstance(cookies, list):
+                for cookie in cookies:
+                    if cookie.get("name") == "sessionid":
+                        return str(cookie.get("value", "")).strip()
+    return raw
+
+
+def _load_settings(cl: Client) -> None:
+    session_data = get_config(SESSION_KEY)
+    if session_data:
+        try:
+            cl.set_settings(json.loads(session_data))
+        except Exception:
+            logger.warning("Failed to load stored Instagram session settings.")
+
+
+def _store_settings(cl: Client) -> None:
+    try:
+        set_config(SESSION_KEY, json.dumps(cl.get_settings()))
+        if getattr(cl, "sessionid", None):
+            set_config(SESSION_ID_KEY, cl.sessionid)
+    except Exception:
+        logger.warning("Could not persist Instagram settings/session.")
+
+
+def _login(cl: Client) -> Tuple[bool, str]:
     username, password = _credentials()
+    sessionid = _extract_sessionid(get_config(SESSION_ID_KEY, ""))
+
+    # Prefer sessionid login to mimic a trusted device and reduce challenge risk
+    if sessionid:
+        try:
+            cl.login_by_sessionid(sessionid)
+            _store_settings(cl)
+            set_account_state("instagram", True, None)
+            return True, "Session login successful."
+        except Exception as exc:
+            logger.warning("Instagram sessionid login failed: %s", exc)
+
     if not username or not password:
         msg = "Instagram credentials missing."
         set_account_state("instagram", False, msg)
         return False, msg
 
-    cl = Client()
-    cl.delay_range = [1, 3]
-    
-    session_data = get_config(SESSION_KEY)
-
     try:
-        if session_data:
-            try:
-                cl.set_settings(json.loads(session_data))
-            except Exception:
-                logger.warning("Failed to load stored Instagram session.")
-
-        # cl.login() automatically validates the session if settings are loaded.
-        # It only performs a full login if the session is invalid.
         cl.login(username, password)
-        
-        # Fix: Save session IMMEDIATELY after login/validation, before upload
-        # This prevents losing a valid session if the video upload itself fails.
-        set_config(SESSION_KEY, json.dumps(cl.get_settings()))
+        _store_settings(cl)
         set_account_state("instagram", True, None)
-
-        media = cl.clip_upload(video_path, caption=(caption or "")[:2200])
-        return True, f"Uploaded PK: {media.pk}"
-
+        return True, f"Login successful for @{username}"
     except ChallengeRequired:
-        msg = "Instagram 2FA/Challenge required. Log in manually on a phone."
+        msg = "Instagram challenge/2FA required. Approve on your device, then retry."
         set_account_state("instagram", False, msg)
         return False, msg
     except Exception as exc:
-        err_str = str(exc)
+        err_str = _format_error(exc)
+        set_account_state("instagram", False, err_str)
+        return False, err_str
+
+
+def upload(video_path: str, caption: str):
+    cl = Client()
+    cl.delay_range = [1, 3]
+    _load_settings(cl)
+
+    ok, msg = _login(cl)
+    if not ok:
+        return False, msg
+
+    try:
+        media = cl.clip_upload(video_path, caption=(caption or "")[:2200])
+        _store_settings(cl)
+        return True, f"Uploaded PK: {media.pk}"
+
+    except Exception as exc:
+        err_str = _format_error(exc)
         if "ffmpeg" in err_str.lower() or "No such file" in err_str:
             err_str += " (Ensure FFMPEG is installed on the system)"
             
@@ -59,29 +132,21 @@ def verify_login() -> Tuple[bool, str]:
     """
     Lightweight validation used by the UI to confirm credentials/session are still good.
     """
-    username, password = _credentials()
-    if not username or not password:
-        msg = "Instagram credentials missing."
-        set_account_state("instagram", False, msg)
-        return False, msg
-
     cl = Client()
-    session_data = get_config(SESSION_KEY)
-    if session_data:
-        try:
-            cl.set_settings(json.loads(session_data))
-        except Exception:
-            logger.warning("Failed to load stored Instagram session.")
+    _load_settings(cl)
 
-    try:
-        cl.login(username, password)
-        set_config(SESSION_KEY, json.dumps(cl.get_settings()))
-        set_account_state("instagram", True, None)
-        return True, f"Session valid for @{username}"
-    except ChallengeRequired:
-        msg = "Instagram 2FA/Challenge required. Log in manually on a phone."
-        set_account_state("instagram", False, msg)
-        return False, msg
-    except Exception as exc:
-        set_account_state("instagram", False, str(exc))
-        return False, str(exc)
+    ok, msg = _login(cl)
+    if ok:
+        return True, msg
+    return False, msg
+
+
+def save_sessionid(raw: str) -> Tuple[bool, str]:
+    sessionid = _extract_sessionid(raw)
+    if not sessionid:
+        set_config(SESSION_ID_KEY, "")
+        set_account_state("instagram", False, "Session cleared.")
+        return False, "No sessionid detected."
+    set_config(SESSION_ID_KEY, sessionid)
+    set_account_state("instagram", True, None)
+    return True, "Instagram session stored. Use Verify to confirm."

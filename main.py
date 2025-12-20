@@ -396,6 +396,19 @@ with tabs[2]:
             set_account_state("instagram", bool(ig_user and ig_pass), None)
             logger.info("Instagram credentials updated (user=%s, password_set=%s).", ig_user or "<blank>", bool(ig_pass))
             st.success("Instagram credentials saved.")
+    st.caption("Tip: Prefer session cookie login to avoid challenges; username/password is only a fallback.")
+    with st.form("ig_session_form"):
+        st.caption("Paste Instagram sessionid (cookie header, raw value, or instagrapi JSON).")
+        ig_session_raw = st.text_area("Session cookie / JSON", value=get_config("insta_sessionid", ""), height=120)
+        if st.form_submit_button("Save Instagram session"):
+            from src.platforms import instagram as instagram_platform
+
+            ok, msg = instagram_platform.save_sessionid(ig_session_raw)
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+            st.rerun()
     ig_actions = st.columns(2)
     if ig_actions[0].button("Verify Instagram login now"):
         from src.platforms import instagram as instagram_platform
