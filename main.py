@@ -241,18 +241,29 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Upload & Queue")
     paused = bool(int(get_config("queue_paused", 0) or 0))
-    pause_col, resume_col, force_col = st.columns(3)
-    if pause_col.button("Pause uploads"):
-        set_config("queue_paused", 1)
-        logger.warning("Queue paused via UI.")
-        st.info("Uploads paused. Nothing will be posted until resumed.")
-        st.rerun()
-    if resume_col.button("Resume uploads"):
-        set_config("queue_paused", 0)
-        logger.info("Queue resumed via UI.")
-        st.success("Uploads resumed. Next due item will post at its scheduled slot.")
-        st.rerun()
-    if force_col.button("Upload next now"):
+    pause_col, force_col = st.columns([2, 1])
+    pause_toggle = pause_col.toggle(
+        "Pause uploads",
+        value=paused,
+        help="When on, the worker will not post until you turn it off.",
+        key="pause_toggle",
+    )
+    if pause_toggle != paused:
+        set_config("queue_paused", int(pause_toggle))
+        if pause_toggle:
+            logger.warning("Queue paused via UI.")
+            st.info("Uploads paused. Nothing will be posted until resumed.")
+        else:
+            logger.info("Queue resumed via UI.")
+            st.success("Uploads resumed. Next due item will post at its scheduled slot.")
+
+    confirm = force_col.checkbox("Confirm now", key="confirm_force_upload", value=False)
+    force_now = force_col.button(
+        "Upload next now",
+        help="Process the next queued item immediately.",
+        disabled=not confirm,
+    )
+    if force_now and confirm:
         set_config("queue_force_run", 1)
         logger.info("Force upload requested via UI.")
         st.success("Next due item will be processed immediately by the worker.")
@@ -265,7 +276,8 @@ with tabs[1]:
         "Shuffle video order before scheduling (randomize which video goes first)", value=True
     )
     per_platform_shuffle = st.checkbox(
-        "Randomize platform order + add 10-30s gap between platforms", value=bool(int(get_config("platform_shuffle", 1) or 0))
+        "Randomize platform order + add 30s gap between platforms",
+        value=bool(int(get_config("platform_shuffle", 1) or 0)),
     )
     set_config("platform_shuffle", int(per_platform_shuffle))
 

@@ -2,21 +2,34 @@
 
 Upload 7–10 shorts once and auto-post them to YouTube Shorts, Instagram Reels, and TikTok on a shared schedule. Built for Raspberry Pi 8GB, mobile-friendly UI (via Twingate), and local persistence.
 
-### Quick start (Docker)
-```powershell
-docker build -t social-scheduler .
-docker run -d --name scheduler ^
-  -p 8501:8501 ^
-  -e TZ="UTC" ^
-  --shm-size=1g ^
-  -v %cd%/data:/app/data ^
-  social-scheduler
-```
+### What you need
+- Raspberry Pi (or any Linux host) with Docker or Python 3.11.
+- Chromium + chromedriver (bundled in the Dockerfile).
+- Google Cloud project with YouTube Data API v3 enabled and one Desktop OAuth client JSON.
+- Instagram session cookie (`sessionid`) exported from a trusted device (preferred) or instagrapi settings JSON.
+- TikTok `sessionid` cookie from a logged-in browser.
+- (Optional) Telegram bot token + chat ID for alerts.
 
+### Quick start (Docker)
 ```bash
 docker build -t social-scheduler .
-docker run -d --name scheduler -p 8501:8501 -e TZ="CET" --shm-size=1g -v $(pwd)/data:/app/data social-scheduler
+docker run -d --name scheduler \
+  -p 8501:8501 \
+  -e TZ="UTC" \
+  --shm-size=1g \
+  -v $(pwd)/data:/app/data \
+  social-scheduler
 ```
+Windows PowerShell:
+```powershell
+docker run -d --name scheduler `
+  -p 8501:8501 `
+  -e TZ="UTC" `
+  --shm-size=1g `
+  -v ${PWD}/data:/app/data `
+  social-scheduler
+```
+UI: `http://<pi-ip>:8501` (open through Twingate on your phone). The `data/` volume holds DB, uploads, cookies/tokens, and logs.
 
 ### Local (no Docker)
 ```bash
@@ -27,22 +40,27 @@ streamlit run main.py  # UI
 python run_worker.py   # worker (separate shell)
 ```
 
-### Daily flow
-- Drop multiple mp4/mov files in **Upload & Queue**. One title/description/time applies to all. Videos are shuffled and per-platform order is randomized to avoid simultaneous posting.
-- Preview clips inline; “Push to next slot” reshuffles without re-uploading.
-- Dashboard shows remaining storage; “Clean oldest uploads” frees space by deleting already-posted files first.
-- Logs are visible/downloadable from the **Logs** tab.
+### Configure accounts (step-by-step)
+- **YouTube (required)**
+  1) In Google Cloud Console, create a project and enable **YouTube Data API v3**.
+  2) OAuth consent screen: set up External, add your Google account under Test Users.
+  3) Credentials: create **OAuth client ID → Desktop app**; download the JSON.
+  4) In the app UI (Accounts → Google API Setup), paste the JSON and save.
+  5) Click “Open Google OAuth screen”, sign in, copy the code Google shows, paste it back, and finish. Tokens auto-refresh; reuse this same JSON everywhere.
+- **Instagram (recommended: session-based)**
+  - Best: grab `sessionid` from a trusted device (browser DevTools Cookies for instagram.com) or paste instagrapi settings JSON. Save it in Accounts → Instagram → session form, then Verify.
+  - Fallback: username/password (expand the fallback form). May trigger challenges; use only if session isn’t available.
+- **TikTok**
+  - Paste `sessionid` in Accounts → TikTok. Accepted formats: raw value (`123...`), cookie header (`sessionid=123...; path=/;`), or DevTools JSON export containing `cookies`/`sessionid`. Verify to confirm; the worker blocks uploads if invalid.
+- **Telegram (optional)**
+  - Add bot token + chat ID in Settings. Alerts fire on failures/auth gaps and when the queue auto-pauses.
 
-### Accounts (tokens/cookies)
-- **YouTube**: In **Accounts → Google API Setup**, paste your Desktop OAuth client JSON. Open OAuth, paste the code back, and link. Tokens auto-refresh.
-- **Instagram** (safer): paste your `sessionid` cookie or instagrapi settings JSON from a trusted device. Username/password is only a fallback and may trigger challenges.
-- **TikTok**: Paste `sessionid` — any of:
-  - Raw value: `123...`
-  - Cookie header snippet: `sessionid=123...; path=/;`
-  - DevTools JSON export containing `cookies` or `sessionid`
-  The UI verifies immediately, warns after ~25 days, and the worker blocks uploads if invalid.
-- **Telegram** (optional): Add bot token + chat ID in Settings for alerts on failures/auth gaps.
+### Daily flow
+- Upload & Queue: drop multiple mp4/mov files. One title/description/time applies to all; videos and platform order are randomized to avoid simultaneous posting. Preview clips inline.
+- Queue controls: Pause/Resume uploads, “Upload next now” to force the next item, “Push to next slot” per item, auto-pause on failures with Telegram alert.
+- Storage: dashboard shows free/used space; “Clean oldest uploads” deletes already-posted files first.
+- Logs: view/download `data/logs/scheduler.log` from the Logs tab.
 
 ### Tips
 - Keep `data/` backed up when you rebuild the Pi; it contains the DB, schedule, credentials, and upload history.
-- If TikTok/YouTube stop uploading, re-paste the cookie/auth code; verification buttons are in **Accounts**.
+- If TikTok/YouTube stop uploading, re-paste the cookie/auth code and use the Verify buttons in Accounts.
