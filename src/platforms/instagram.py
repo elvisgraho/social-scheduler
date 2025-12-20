@@ -137,7 +137,9 @@ def verify_login() -> Tuple[bool, str]:
 
     ok, msg = _login(cl)
     if ok:
+        logger.info("Instagram session verified.")
         return True, msg
+    logger.warning("Instagram verification failed: %s", msg)
     return False, msg
 
 
@@ -149,4 +151,9 @@ def save_sessionid(raw: str) -> Tuple[bool, str]:
         return False, "No sessionid detected."
     set_config(SESSION_ID_KEY, sessionid)
     set_account_state("instagram", True, None)
+    logger.info("Instagram sessionid stored (len=%s).", len(sessionid))
     return True, "Instagram session stored. Use Verify to confirm."
+
+
+def session_connected() -> bool:
+    return bool(get_config(SESSION_ID_KEY, "") or get_config(SESSION_KEY, ""))

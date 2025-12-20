@@ -387,16 +387,21 @@ with tabs[2]:
         st.rerun()
 
     st.markdown("#### Instagram")
-    with st.form("ig_form"):
-        ig_user = st.text_input("Username", value=get_config("insta_user", ""))
-        ig_pass = st.text_input("Password", type="password")
-        if st.form_submit_button("Save Instagram credentials"):
-            set_config("insta_user", ig_user)
-            set_config("insta_pass", ig_pass)
-            set_account_state("instagram", bool(ig_user and ig_pass), None)
-            logger.info("Instagram credentials updated (user=%s, password_set=%s).", ig_user or "<blank>", bool(ig_pass))
-            st.success("Instagram credentials saved.")
-    st.caption("Tip: Prefer session cookie login to avoid challenges; username/password is only a fallback.")
+    st.caption("Prefer session cookie login to avoid challenges; username/password is optional fallback.")
+    with st.expander("Optional username/password (fallback only)", expanded=False):
+        with st.form("ig_form"):
+            ig_user = st.text_input("Username", value=get_config("insta_user", ""))
+            ig_pass = st.text_input("Password", type="password")
+            if st.form_submit_button("Save Instagram credentials"):
+                set_config("insta_user", ig_user)
+                set_config("insta_pass", ig_pass)
+                set_account_state("instagram", bool(ig_user and ig_pass), None)
+                logger.info(
+                    "Instagram credentials updated (user=%s, password_set=%s).",
+                    ig_user or "<blank>",
+                    bool(ig_pass),
+                )
+                st.success("Instagram credentials saved.")
     with st.form("ig_session_form"):
         st.caption("Paste Instagram sessionid (cookie header, raw value, or instagrapi JSON).")
         ig_session_raw = st.text_area("Session cookie / JSON", value=get_config("insta_sessionid", ""), height=120)

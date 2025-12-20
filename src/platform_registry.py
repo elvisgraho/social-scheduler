@@ -8,7 +8,10 @@ PlatformConfig = Dict[str, Callable]
 
 
 def _instagram_connected() -> bool:
-    return bool(get_config("insta_user") and get_config("insta_pass"))
+    try:
+        return platforms.instagram.session_connected()
+    except Exception:
+        return False
 
 
 def _tiktok_connected() -> bool:
