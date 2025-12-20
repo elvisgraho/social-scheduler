@@ -427,8 +427,10 @@ with tabs[2]:
         ok, msg = verify_youtube_credentials()
         if ok:
             st.success(msg)
+            logger.info("YouTube token verification succeeded.")
         else:
             st.error(msg)
+            logger.warning("YouTube token verification failed: %s", msg)
     if yt_connected and yt_actions[1].button("Disconnect YouTube"):
         set_config(YOUTUBE_KEY, "")
         set_account_state("youtube", False, "Disconnected by user")
@@ -470,8 +472,10 @@ with tabs[2]:
         ok, msg = instagram_platform.verify_login()
         if ok:
             st.success(msg)
+            logger.info("Instagram verification succeeded.")
         else:
             st.error(msg)
+            logger.warning("Instagram verification failed: %s", msg)
 
     st.markdown("#### TikTok")
     tt_status = tiktok_platform.session_status()

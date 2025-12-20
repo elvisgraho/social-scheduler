@@ -2,9 +2,12 @@ import json
 import os
 from typing import Optional, Tuple
 
+import logging
+
 from google_auth_oauthlib.flow import Flow
 
 from src.database import get_config, set_account_state, set_config
+from src.logging_utils import init_logging
 
 CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -12,6 +15,7 @@ REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob"
 YOUTUBE_KEY = "youtube_credentials"
 LEGACY_KEYS = ["youtube_token"]
 GOOGLE_CLIENT_CONFIG_KEY = "google_oauth_client"
+logger = init_logging("youtube.auth")
 
 
 def _load_client_config() -> dict:
@@ -93,10 +97,12 @@ def verify_youtube_credentials() -> tuple[bool, str]:
             creds.refresh(Request())
             set_config(YOUTUBE_KEY, creds.to_json())
         set_account_state("youtube", True, None)
+        logger.info("YouTube credentials verified/refreshed successfully.")
         return True, "YouTube token is valid."
     except Exception as exc:
         msg = f"Credential error: {exc}"
         set_account_state("youtube", False, msg)
+        logger.warning("YouTube credential verification failed: %s", msg)
         return False, msg
 
 
