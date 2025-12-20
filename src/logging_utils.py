@@ -20,11 +20,20 @@ def _base_logger(level: int) -> logging.Logger:
     logger = logging.getLogger(BASE_LOGGER_NAME)
     logger.setLevel(level)
 
-    has_handler = any(
-        isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", "") == str(LOG_FILE)
-        for h in logger.handlers
-    )
-    if not has_handler:
+    # Ensure only one rotating handler writes to the log file (deduplicate on reloads/reruns).
+    seen = False
+    for h in list(logger.handlers):
+        if isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", "") == str(LOG_FILE):
+            if seen:
+                logger.removeHandler(h)
+                try:
+                    h.close()
+                except Exception:
+                    pass
+            else:
+                seen = True
+
+    if not seen:
         handler = RotatingFileHandler(
             LOG_FILE,
             maxBytes=1_000_000,
