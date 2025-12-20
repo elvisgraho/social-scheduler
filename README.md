@@ -15,12 +15,7 @@ docker run -d --name scheduler ^
 
 ```bash
 docker build -t social-scheduler .
-docker run -d --name scheduler \
-  -p 8501:8501 \
-  -e TZ="UTC" \
-  --shm-size=1g \
-  -v $(pwd)/data:/app/data \
-  social-scheduler
+docker run -d --name scheduler -p 8501:8501 -e TZ="CET" --shm-size=1g -v $(pwd)/data:/app/data social-scheduler
 ```
 
 ### Local (no Docker)

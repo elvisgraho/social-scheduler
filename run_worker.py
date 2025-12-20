@@ -24,6 +24,7 @@ from src.scheduling import get_schedule, next_slots
 
 logger = init_logging("worker")
 MAX_ATTEMPTS = 3
+WORKER_BUSY = False
 
 
 def _now_with_timezone() -> datetime:
