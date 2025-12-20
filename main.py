@@ -241,6 +241,9 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Upload & Queue")
     paused = bool(int(get_config("queue_paused", 0) or 0))
+    has_queue_items = any(row["status"] in ("pending", "retry") for row in queue_rows)
+    if not has_queue_items:
+        st.session_state["force_now_confirmed"] = False
     pause_col, force_col = st.columns([2, 1])
     pause_toggle = pause_col.toggle(
         "Pause uploads",
@@ -261,9 +264,12 @@ with tabs[1]:
         "Upload next now",
         help="Process the next queued item immediately.",
         type="primary",
+        disabled=not has_queue_items,
     )
     if force_now:
-        if st.session_state.get("force_now_confirmed"):
+        if not has_queue_items:
+            st.warning("No queued videos to upload.")
+        elif st.session_state.get("force_now_confirmed"):
             set_config("queue_force_run", 1)
             logger.info("Force upload requested via UI.")
             st.success("Next due item will be processed immediately by the worker.")

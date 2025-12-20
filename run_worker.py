@@ -211,8 +211,8 @@ def check_and_post():
         if not due and force:
             # If forcing and nothing is strictly due, pick the earliest pending/retry
             from src.database import get_queue
-            all_items = get_queue(limit=1)
-            due = all_items if all_items else []
+            pending = [row for row in get_queue(limit=200) if row.get("status") in ("pending", "retry")]
+            due = pending[:1] if pending else []
         if force:
             set_config(FORCE_KEY, 0)
         
