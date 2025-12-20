@@ -257,16 +257,20 @@ with tabs[1]:
             logger.info("Queue resumed via UI.")
             st.success("Uploads resumed. Next due item will post at its scheduled slot.")
 
-    confirm = force_col.checkbox("Confirm now", key="confirm_force_upload", value=False)
     force_now = force_col.button(
         "Upload next now",
         help="Process the next queued item immediately.",
-        disabled=not confirm,
+        type="primary",
     )
-    if force_now and confirm:
-        set_config("queue_force_run", 1)
-        logger.info("Force upload requested via UI.")
-        st.success("Next due item will be processed immediately by the worker.")
+    if force_now:
+        if st.session_state.get("force_now_confirmed"):
+            set_config("queue_force_run", 1)
+            logger.info("Force upload requested via UI.")
+            st.success("Next due item will be processed immediately by the worker.")
+            st.session_state["force_now_confirmed"] = False
+        else:
+            st.warning("Click again to confirm immediate upload.")
+            st.session_state["force_now_confirmed"] = True
 
     uploaded_files = st.file_uploader(
         "Drop multiple shorts (mp4/mov)", type=["mp4", "mov", "m4v"], accept_multiple_files=True
