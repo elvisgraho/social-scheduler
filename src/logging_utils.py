@@ -5,6 +5,7 @@ from pathlib import Path
 LOG_DIR = Path("data/logs")
 LOG_FILE = LOG_DIR / "scheduler.log"
 BASE_LOGGER_NAME = "scheduler"
+_LOG_ONCE_KEYS = set()
 
 
 def _ensure_log_dir() -> None:
@@ -69,3 +70,15 @@ def tail_log(lines: int = 200) -> str:
     with path.open("r", encoding="utf-8", errors="ignore") as fh:
         data = fh.readlines()[-lines:]
     return "".join(data) if data else "Log file is empty."
+
+
+def log_once(logger: logging.Logger, key: str, message: str, level: int = logging.INFO) -> None:
+    """
+    Emit a log message only once per process using an in-memory key.
+    Useful to avoid duplicate startup logs on Streamlit reruns.
+    """
+    global _LOG_ONCE_KEYS
+    if key in _LOG_ONCE_KEYS:
+        return
+    _LOG_ONCE_KEYS.add(key)
+    logger.log(level, message)

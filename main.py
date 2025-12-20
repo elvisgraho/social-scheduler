@@ -28,7 +28,7 @@ from src.database import (
     set_account_state,
     set_config,
 )
-from src.logging_utils import get_log_file_path, init_logging, tail_log
+from src.logging_utils import get_log_file_path, init_logging, tail_log, log_once
 from src.notifier import send_telegram_message, telegram_enabled
 from src.platform_registry import all_platform_statuses, get_platforms
 from src.platforms import tiktok as tiktok_platform
@@ -37,7 +37,7 @@ from src.scheduling import get_schedule, human_readable_schedule, next_slots, sa
 st.set_page_config(page_title="Social Scheduler", page_icon="SS", layout="centered")
 init_db()
 logger = init_logging("ui")
-logger.info("Streamlit UI started.")
+log_once(logger, "ui_started", "Streamlit UI started.")
 
 DATA_DIR = Path("data")
 UPLOAD_DIR = Path("data/uploads")

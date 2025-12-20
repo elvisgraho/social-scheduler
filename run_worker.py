@@ -23,6 +23,7 @@ from src.platforms import tiktok as tiktok_platform
 from src.scheduling import get_schedule, next_slots
 
 logger = init_logging("worker")
+from src.logging_utils import log_once
 MAX_ATTEMPTS = 3
 WORKER_BUSY = False
 
@@ -215,7 +216,7 @@ def check_and_post():
 
 
 def main():
-    logger.info("Scheduler worker started.")
+    log_once(logger, "worker_started", "Scheduler worker started.")
     init_db()
     schedule.every(1).minutes.do(check_and_post)
     while True:
