@@ -20,30 +20,24 @@ def _base_logger(level: int) -> logging.Logger:
     logger = logging.getLogger(BASE_LOGGER_NAME)
     logger.setLevel(level)
 
-    # Ensure only one rotating handler writes to the log file (deduplicate on reloads/reruns).
-    seen = False
+    # Hard reset handlers to avoid duplicates from Streamlit reruns or module reloads.
     for h in list(logger.handlers):
-        if isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", "") == str(LOG_FILE):
-            if seen:
-                logger.removeHandler(h)
-                try:
-                    h.close()
-                except Exception:
-                    pass
-            else:
-                seen = True
+        logger.removeHandler(h)
+        try:
+            h.close()
+        except Exception:
+            pass
 
-    if not seen:
-        handler = RotatingFileHandler(
-            LOG_FILE,
-            maxBytes=1_000_000,
-            backupCount=5,
-            encoding="utf-8",
-        )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
-        logger.addHandler(handler)
+    handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=1_000_000,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    logger.addHandler(handler)
 
     logger.propagate = False  # keep records out of root handlers (e.g., Streamlit defaults)
     logging.captureWarnings(True)
