@@ -2,7 +2,7 @@ import json
 import os
 import time
 import random 
-from datetime import datetime
+from datetime import datetime, time, timedelta
 
 import pytz
 import schedule
@@ -20,6 +20,7 @@ from src.database import (
 from src.logging_utils import init_logging
 from src.notifier import send_telegram_message
 from src.platform_registry import get_platforms
+from src.auth_utils import verify_youtube_credentials
 from src.platforms import tiktok as tiktok_platform
 from src.scheduling import get_schedule, next_slots
 
@@ -29,6 +30,8 @@ MAX_ATTEMPTS = 3
 WORKER_BUSY = False
 PAUSE_KEY = "queue_paused"
 FORCE_KEY = "queue_force_run"
+TOKEN_CHECK_KEY = "last_token_check_date"
+TOKEN_CHECK_TIME = time(hour=8, minute=0)
 
 
 def _now_with_timezone() -> datetime:
@@ -64,6 +67,40 @@ def _platform_shuffle_enabled() -> bool:
         return bool(int(get_config("platform_shuffle", 1) or 0))
     except Exception:
         return True
+
+
+def _run_token_checks(now: datetime) -> None:
+    """
+    Validate platform tokens/sessions and warn on failure.
+    """
+    ok, msg = verify_youtube_credentials()
+    if ok:
+        logger.info("Daily YouTube token verification passed.")
+    else:
+        _notify(f"YouTube token check failed: {msg}")
+
+    tt_ok, tt_msg = tiktok_platform.verify_session(force=True)
+    if tt_ok:
+        logger.info("Daily TikTok session verification passed.")
+    else:
+        _notify(f"TikTok session check failed: {tt_msg}")
+
+    set_config(TOKEN_CHECK_KEY, now.date().isoformat())
+
+
+def _maybe_verify_tokens(now: datetime) -> None:
+    """
+    Run token checks once per day after the configured morning time.
+    """
+    try:
+        last_run = get_config(TOKEN_CHECK_KEY)
+        if last_run == now.date().isoformat():
+            return
+        if now.time() < TOKEN_CHECK_TIME:
+            return
+        _run_token_checks(now)
+    except Exception as exc:
+        logger.warning("Skipping daily token check: %s", exc)
 
 
 def process_video(video: dict) -> None:
@@ -152,38 +189,42 @@ def process_video(video: dict) -> None:
 
     # 5. Determine Final Status
     # If there are failures, we retry. BUT we must ensure we don't retry forever.
-        if failures or missing_accounts:
-            status = "retry" if attempts < MAX_ATTEMPTS else "failed"
-            
-            # Consolidate error messages
-            error_msg = "; ".join(failures) if failures else "Awaiting account connections."
-            
-            update_queue_status(queue_id, status, error_msg, current_logs)
-            set_config(PAUSE_KEY, 1)
-            
-            if status == "retry":
-                # Smart Reschedule: Ensure we don't retry immediately.
-                # Look for next slot, but force at least 1 hour delay for retries.
-                future_slots = next_slots(1, start=_now_with_timezone())
-            
-            retry_time = None
+    if failures or missing_accounts:
+        status = "retry" if attempts < MAX_ATTEMPTS else "failed"
+
+        # Consolidate error messages
+        parts = []
+        if failures:
+            parts.append("; ".join(failures))
+        if missing_accounts:
+            parts.append(f"Awaiting account connections: {', '.join(missing_accounts)}")
+        error_msg = "; ".join(parts) if parts else "Awaiting account connections."
+
+        update_queue_status(queue_id, status, error_msg, current_logs)
+        set_config(PAUSE_KEY, 1)
+
+        retry_time = None
+        if status == "retry":
+            future_slots = next_slots(1, start=_now_with_timezone())
             if future_slots:
                 retry_time = future_slots[0]
-            
+
             # Enforce minimum backoff of 60 mins for retries to allow API limits to reset
-            # (Logic depends on your next_slots implementation, but this is safer)
-            from datetime import timedelta
             min_backoff = _now_with_timezone() + timedelta(minutes=60)
-            
             if not retry_time or retry_time < min_backoff:
                 retry_time = min_backoff
 
             reschedule_queue_item(queue_id, retry_time.isoformat())
-            logger.info("Rescheduled queue #%s (Attempt %s/%s) for %s due to failures.", 
-                        queue_id, attempts, MAX_ATTEMPTS, retry_time.isoformat())
-            
-        if failures:
-            _notify(f"Queue #{queue_id} partial failure: {'; '.join(failures)}. Queue paused.")
+            logger.info(
+                "Rescheduled queue #%s (Attempt %s/%s) for %s due to failures.",
+                queue_id,
+                attempts,
+                MAX_ATTEMPTS,
+                retry_time.isoformat(),
+            )
+
+        if failures or missing_accounts:
+            _notify(f"Queue #{queue_id} paused: {error_msg}")
         return
 
     # Success
@@ -193,6 +234,10 @@ def process_video(video: dict) -> None:
 
 def check_and_post():
     global WORKER_BUSY
+    now = _now_with_timezone()
+    _maybe_verify_tokens(now)
+    warn_tiktok_session_if_needed()
+
     if WORKER_BUSY:
         logger.debug("Worker is busy, skipping schedule tick.")
         return
@@ -205,8 +250,6 @@ def check_and_post():
 
     WORKER_BUSY = True
     try:
-        warn_tiktok_session_if_needed()
-        now = _now_with_timezone()
         due = get_due_queue(now.isoformat())
         if not due and force:
             # If forcing and nothing is strictly due, pick the earliest pending/retry

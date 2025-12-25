@@ -10,8 +10,8 @@ import pandas as pd
 import pytz
 
 # Imports from your existing modules
-from src.database import add_to_queue, get_config
-from src.scheduling import get_schedule
+from src.database import add_to_queue, get_config, reschedule_queue_item
+from src.scheduling import get_schedule, next_slots
 
 logger = logging.getLogger("ui_logic")
 
@@ -95,13 +95,18 @@ def save_files_to_queue(
         random.shuffle(paired)
 
     success_count = 0
+    base_timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+    sequence = 1
     
     for uploaded_file, slot in paired:
-        # Sanitize filename
-        safe_name = Path(uploaded_file.name).name
-        # Use UTC timestamp for unique filename to avoid collisions
-        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-        destination = upload_dir / f"{timestamp}_{safe_name}"
+        ext = Path(uploaded_file.name).suffix or ".mp4"
+        destination = upload_dir / f"{base_timestamp}_{sequence:02d}{ext}"
+
+        # Ensure uniqueness even if multiple uploads land in the same second
+        while destination.exists():
+            sequence += 1
+            destination = upload_dir / f"{base_timestamp}_{sequence:02d}{ext}"
+        sequence += 1
         
         try:
             with destination.open("wb") as f:
@@ -204,3 +209,47 @@ def get_storage_summary(data_dir: Path) -> Tuple[Optional[float], Optional[float
     except Exception as exc:
         logger.warning("Unable to read disk usage: %s", exc)
         return None, None, None, None
+
+
+def reschedule_pending_items(
+    queue_rows: List[Dict[str, Any]], start: Optional[datetime] = None
+) -> Tuple[int, Optional[datetime]]:
+    """
+    Move all pending/retry items to the next available schedule slots.
+    Returns (count_rescheduled, first_slot_used).
+    """
+    pending_items = [row for row in queue_rows if row.get("status") in ("pending", "retry")]
+    if not pending_items:
+        return 0, None
+
+    cfg = get_schedule()
+    try:
+        tz = pytz.timezone(cfg.get("timezone", "UTC"))
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+
+    anchor = start or datetime.now(tz)
+    if anchor.tzinfo is None:
+        anchor = tz.localize(anchor)
+    else:
+        anchor = anchor.astimezone(tz)
+
+    slots = next_slots(len(pending_items), start=anchor)
+    if not slots:
+        return 0, None
+
+    def _scheduled_key(item: Dict[str, Any]) -> datetime:
+        dt = parse_iso(item.get("scheduled_for"))
+        if dt and dt.tzinfo is None:
+            dt = tz.localize(dt)
+        return dt or datetime.min.replace(tzinfo=pytz.UTC)
+
+    pending_sorted = sorted(pending_items, key=_scheduled_key)
+    rescheduled = 0
+    for row, slot in zip(pending_sorted, slots):
+        reschedule_queue_item(row["id"], slot.isoformat())
+        rescheduled += 1
+
+    if rescheduled < len(pending_sorted):
+        logger.warning("Only rescheduled %s/%s items due to limited slots.", rescheduled, len(pending_sorted))
+    return rescheduled, slots[0] if rescheduled else None

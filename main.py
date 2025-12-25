@@ -106,21 +106,36 @@ def render_dashboard_tab(queue_rows):
                     st.info("No uploaded items eligible for cleanup.")
 
     # Next Up Info
-    next_up = next(
-        (row for row in queue_rows if row.get("scheduled_for") and row["status"] in ("pending", "retry")),
-        None,
-    )
-    if next_up:
-        st.info(f"Next upload #{next_up['id']} at {ui_logic.format_datetime_for_ui(next_up['scheduled_for'])}")
+    if paused:
+        st.info("Queue is paused. Resume uploads to continue scheduling.")
     else:
-        upcoming = next_slots(1)
-        if upcoming:
-            st.info(f"No videos waiting. Next available slot: {upcoming[0].strftime('%b %d %H:%M %Z')}")
+        next_up = next(
+            (row for row in queue_rows if row.get("scheduled_for") and row["status"] in ("pending", "retry")),
+            None,
+        )
+        if next_up:
+            st.info(f"Next upload #{next_up['id']} at {ui_logic.format_datetime_for_ui(next_up['scheduled_for'])}")
         else:
-            st.warning("No valid schedule slots configured. Please check Settings.")
+            upcoming = next_slots(1)
+            if upcoming:
+                st.info(f"No videos waiting. Next available slot: {upcoming[0].strftime('%b %d %H:%M %Z')}")
+            else:
+                st.warning("No valid schedule slots configured. Please check Settings.")
 
 def render_queue_tab(queue_rows):
     st.subheader("Upload & Queue")
+
+    notice = st.session_state.pop("queue_notice", None)
+    if isinstance(notice, dict):
+        level = notice.get("level", "info")
+        text = notice.get("text", "")
+        if text:
+            if level == "success":
+                st.success(text)
+            elif level == "warning":
+                st.warning(text)
+            else:
+                st.info(text)
     
     paused = bool(int(get_config("queue_paused", 0) or 0))
     has_queue_items = any(row["status"] in ("pending", "retry") for row in queue_rows)
@@ -142,10 +157,15 @@ def render_queue_tab(queue_rows):
         set_config("queue_paused", int(pause_toggle))
         if pause_toggle:
             logger.warning("Queue paused via UI.")
-            st.info("Uploads paused.")
+            st.session_state["queue_notice"] = {"level": "warning", "text": "Uploads paused."}
         else:
+            rescheduled, first_slot = ui_logic.reschedule_pending_items(queue_rows)
             logger.info("Queue resumed via UI.")
-            st.success("Uploads resumed.")
+            message = "Uploads resumed."
+            if rescheduled:
+                formatted = first_slot.strftime("%b %d %H:%M %Z") if first_slot else "next available slot"
+                message = f"Uploads resumed. Rescheduled {rescheduled} item(s), next at {formatted}."
+            st.session_state["queue_notice"] = {"level": "success", "text": message}
         st.rerun()
 
     # Force Run Button
@@ -171,7 +191,7 @@ def render_queue_tab(queue_rows):
     uploaded_files = st.file_uploader(
         "Drop multiple shorts (mp4/mov)", type=["mp4", "mov", "m4v"], accept_multiple_files=True
     )
-    st.caption("Tip: Upload 7–10 at once with one shared title/description.")
+    st.caption("Tip: Upload 7-10 at once with one shared title/description.")
     
     col_shuf1, col_shuf2 = st.columns(2)
     shuffle_order = col_shuf1.checkbox(
@@ -189,6 +209,9 @@ def render_queue_tab(queue_rows):
     if int(per_platform_shuffle) != int(current_platform_shuffle):
         set_config("platform_shuffle", int(per_platform_shuffle))
 
+    def _uploads_signature(files) -> tuple:
+        return tuple((f.name, getattr(f, "size", None)) for f in files)
+
     # -- Upload Logic --
     if uploaded_files:
         start_dt = ui_logic.get_schedule_start_time(queue_rows)
@@ -205,15 +228,21 @@ def render_queue_tab(queue_rows):
             preview_cols = st.columns(min(3, len(uploaded_files)))
             for idx, uploaded in enumerate(uploaded_files[:3]):
                 preview_cols[idx].video(uploaded)
-                
-            if st.button("Confirm & Add to Queue", width=200, type="primary"):
+
+            sig = _uploads_signature(uploaded_files)
+            if st.session_state.get("queued_sig") != sig:
                 logger.info("Queuing %s new videos.", len(uploaded_files))
                 count = ui_logic.save_files_to_queue(uploaded_files, slots, UPLOAD_DIR, shuffle_order)
                 if count > 0:
-                    st.success(f"Successfully queued {count} videos.")
+                    st.session_state["queued_sig"] = sig
+                    st.success(f"Automatically queued {count} videos.")
                     st.rerun()
                 else:
                     st.error("Failed to queue videos. Check logs.")
+            else:
+                st.info("Uploads already added to the queue.")
+    else:
+        st.session_state.pop("queued_sig", None)
 
     # -- Queue Table --
     st.markdown("### Queue")
