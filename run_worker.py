@@ -2,7 +2,7 @@ import json
 import os
 import time
 import random 
-from datetime import datetime, time, timedelta
+from datetime import datetime, time as dtime, timedelta
 
 import pytz
 import schedule
@@ -31,7 +31,7 @@ WORKER_BUSY = False
 PAUSE_KEY = "queue_paused"
 FORCE_KEY = "queue_force_run"
 TOKEN_CHECK_KEY = "last_token_check_date"
-TOKEN_CHECK_TIME = time(hour=8, minute=0)
+TOKEN_CHECK_TIME = dtime(hour=8, minute=0)
 
 
 def _now_with_timezone() -> datetime:
