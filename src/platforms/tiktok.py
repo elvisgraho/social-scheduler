@@ -1,13 +1,11 @@
 import os
 import time
+import requests
 import json
-import logging
 import shutil
-import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
-import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -18,359 +16,458 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException,
-    WebDriverException,
+    StaleElementReferenceException,
+    ElementClickInterceptedException,
     NoSuchElementException,
-    StaleElementReferenceException
+    WebDriverException
 )
 
-# --- LOCAL IMPORTS ---
-# We use try/except to prevent import errors if running standalone for testing
-try:
-    from src.logging_utils import init_logging
-    from src.database import (
-        get_config,
-        get_json_config,
-        set_account_state,
-        set_config,
-        set_json_config,
-    )
-except ImportError:
-    logging.basicConfig(level=logging.INFO)
-    def init_logging(name): return logging.getLogger(name)
-    def get_config(k, d=None): return d
-    def get_json_config(k, d=None): return d
-    def set_account_state(*args): pass
-    def set_config(*args): pass
-    def set_json_config(*args): pass
+from src.logging_utils import init_logging
+from src.database import (
+    get_config,
+    get_json_config,
+    set_account_state,
+    set_config,
+    set_json_config,
+)
 
 # --- CONFIGURATION ---
 SESSION_KEY = "tiktok_session_bundle"
 LEGACY_KEY = "tiktok_session_id"
 VERIFICATION_INTERVAL_HOURS = 6
-
-# Updated UA for 2025 - Linux Desktop (Stealth)
-USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+REFRESH_WARNING_DAYS = 25
+# Updated User Agent to match a modern Desktop (Chrome 123)
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
 logger = init_logging("tiktok")
 
-# --- ADVANCED JS INJECTIONS ---
+# --- HELPER FUNCTIONS (DO NOT REMOVE OR RENAME) ---
+def _utcnow() -> datetime:
+    return datetime.utcnow()
 
-# 1. POPUP MANAGER (React-Safe)
-# Tries to click buttons first. Only deletes backdrops if they block the UI.
-JS_POPUP_MANAGER = """
-window.setInterval(() => {
-    try {
-        // 1. Defined Keywords to CLICK
-        const clickKeywords = ["Turn on", "Allow all", "Got it", "Decline", "Manage options", "Reload"];
-        
-        // 2. Select potential buttons
-        const candidates = document.querySelectorAll('button, div[role="button"], div[class*="btn"]');
-        
-        candidates.forEach(el => {
-            if (el.offsetParent === null) return; // Skip hidden elements
-            const text = el.innerText || "";
-            
-            // Check for keywords
-            if (clickKeywords.some(k => text.includes(k))) {
-                console.log("[Auto-Click] Clicking:", text);
-                el.click();
-            }
-        });
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value: return None
+    try: return datetime.fromisoformat(value)
+    except Exception: return None
 
-        // 3. Remove "Modal Overlays" that block clicks (Class usually contains 'mask' or 'overlay')
-        const overlays = document.querySelectorAll('div[class*="overlay"], div[class*="mask"]');
-        overlays.forEach(el => {
-            // Only remove if it has a high z-index and covers screen
-            const style = window.getComputedStyle(el);
-            if (parseInt(style.zIndex) > 1000) {
-                console.log("[Auto-Remove] Removing blocking overlay");
-                el.remove();
-            }
-        });
+def _session_bundle() -> Dict:
+    data = get_json_config(SESSION_KEY, {})
+    if not data:
+        legacy = get_config(LEGACY_KEY)
+        if legacy:
+            data = {"sessionid": legacy, "stored_at": _utcnow().isoformat(), "valid": False, "last_verified": None}
+            set_json_config(SESSION_KEY, data)
+    return data or {}
 
-        // 4. Force enable scrolling if stuck
-        if (document.body.style.overflow === 'hidden') {
-            document.body.style.overflow = 'auto';
-        }
-    } catch (e) { }
-}, 500);
-"""
+def _persist_bundle(bundle: Dict) -> None:
+    set_json_config(SESSION_KEY, bundle)
+    if bundle.get("sessionid"):
+        set_config(LEGACY_KEY, bundle["sessionid"])
 
-# 2. INPUT REVEALER
-# TikTok often hides the file input. This forces it to be visible for Selenium.
-JS_REVEAL_INPUT = """
-const input = document.querySelector("input[type='file']");
-if (input) {
-    input.style.display = 'block';
-    input.style.visibility = 'visible';
-    input.style.opacity = '1';
-    input.style.width = '1px';
-    input.style.height = '1px';
-    return true;
-}
-return false;
-"""
+def save_session(session_id: str) -> None:
+    cleaned = session_id.strip()
+    if not cleaned:
+        bundle = {}
+        _persist_bundle(bundle)
+        set_account_state("tiktok", False, "Session missing")
+        set_config("tiktok_refresh_warned", "")
+        return
+    bundle = _session_bundle()
+    bundle.update({"sessionid": cleaned, "stored_at": _utcnow().isoformat(), "valid": False, "last_verified": None, "account_name": None})
+    _persist_bundle(bundle)
+    set_config("tiktok_refresh_warned", "")
+    set_account_state("tiktok", bool(cleaned), None)
+    verify_session(force=True)
 
-# --- SYSTEM UTILS ---
+def _session_age_days(bundle: Dict) -> Optional[int]:
+    stored = bundle.get("stored_at")
+    stored_dt = _parse_iso(stored)
+    if not stored_dt: return None
+    return (_utcnow() - stored_dt).days
 
-def _cleanup_zombies():
-    """Kills orphaned chrome processes to free Pi RAM."""
+def session_status() -> Dict:
+    bundle = _session_bundle()
+    age = _session_age_days(bundle)
+    return {
+        "sessionid": bundle.get("sessionid"),
+        "valid": bundle.get("valid", False),
+        "last_verified": bundle.get("last_verified"),
+        "account_name": bundle.get("account_name"),
+        "stored_at": bundle.get("stored_at"),
+        "needs_refresh": (age is not None and age >= REFRESH_WARNING_DAYS),
+        "age_days": age,
+        "message": bundle.get("last_error"),
+    }
+
+def session_connected() -> bool:
+    """Check if session is present and marked valid."""
+    status = session_status()
+    return bool(status["sessionid"]) and status["valid"]
+
+def _probe_session(session_id: str) -> Tuple[bool, str, Optional[str]]:
+    # Using mobile API info endpoint for lightweight validation
+    url = "https://www.tiktok.com/passport/web/account/info/?aid=1459"
+    headers = {"User-Agent": USER_AGENT, "Cookie": f"sessionid={session_id};"}
     try:
-        # Only kill processes to avoid killing host processes if not in Docker
-        subprocess.run(["pkill", "-f", "chrome"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["pkill", "-f", "chromedriver"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        resp = requests.get(url, headers=headers, timeout=10)
+        data = resp.json()
+        # "login_status" is often 0 for success in this endpoint
+        username = data.get("data", {}).get("username") or data.get("data", {}).get("unique_id")
+        is_valid = (data.get("data", {}).get("login_status") == 0 or bool(username))
+        
+        if is_valid: return True, f"Valid: @{username}", username
+        return False, f"Invalid: {data.get('message') or 'Session expired'}", None
+    except Exception as exc:
+        return False, str(exc), None
+
+def ensure_session_valid(force: bool = False) -> Tuple[bool, Optional[str], str]:
+    bundle = _session_bundle()
+    session_id = bundle.get("sessionid")
+    if not session_id: return False, None, "No session."
+    
+    last = _parse_iso(bundle.get("last_verified"))
+    if not force and bundle.get("valid") and last and _utcnow() - last < timedelta(hours=VERIFICATION_INTERVAL_HOURS):
+        return True, session_id, "Valid (Cached)"
+
+    ok, msg, user = _probe_session(session_id)
+    bundle["valid"] = ok
+    bundle["last_verified"] = _utcnow().isoformat()
+    if user: bundle["account_name"] = user
+    if not ok: bundle["last_error"] = msg
+    _persist_bundle(bundle)
+    set_account_state("tiktok", ok, msg if not ok else None)
+    return ok, session_id, msg
+
+def verify_session(force: bool = True) -> Tuple[bool, str]:
+    ok, _, message = ensure_session_valid(force=force)
+    return ok, message
+
+
+# --- ROBUST INTERACTION UTILS ---
+
+def _inject_text_via_js(driver, element, text):
+    """
+    Safely injects text (including Emojis) into a contenteditable or input
+    using Clipboard API simulation. This fixes 'broken emoji' issues on Linux.
+    """
+    try:
+        # Escape backslashes and quotes for JS
+        safe_text = json.dumps(text)
+        driver.execute_script(f"""
+            var elm = arguments[0];
+            var txt = {safe_text};
+            elm.focus();
+            
+            // Try standard insert first
+            if (document.execCommand('insertText', false, txt)) return;
+            
+            // Fallback for newer React apps
+            var val = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+            if (val && val.set) {{
+                val.set.call(elm, txt);
+            }} else {{
+                elm.value = txt;
+            }}
+            elm.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            elm.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        """, element)
+    except Exception as e:
+        logger.warning(f"JS Inject failed, falling back to send_keys: {e}")
+        element.send_keys(text)
+
+def _nuke_overlays(driver):
+    """
+    Removes generic overlay masks that intercept clicks.
+    """
+    try:
+        driver.execute_script("""
+            document.querySelectorAll("div[class*='mask'], div[class*='overlay'], div[id*='modal-root']").forEach(el => {
+                const rect = el.getBoundingClientRect();
+                // Only nuke if it covers a significant area
+                if (rect.width > 300 && rect.height > 300 && window.getComputedStyle(el).position === 'fixed') {
+                    el.style.display = 'none';
+                    el.style.pointerEvents = 'none';
+                }
+            });
+        """)
     except Exception:
         pass
 
-def _get_driver_path() -> str:
-    """Smart detection for Docker (Alpine/Debian) vs Local."""
+def _dismiss_popups_aggressively(driver):
+    """
+    Eagle Eye: Scans for text buttons, close icons, and hits ESCAPE.
+    """
+    # 1. Hit Escape (Standard accessibility close)
+    try:
+        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+    except:
+        pass
+
+    # 2. Click specific text buttons or Close SVGs
+    keywords = ["Turn on", "Allow all", "Decline", "Got it", "Reload", "Upload", "Close", "No thanks"]
+    script = """
+        const keywords = arguments[0];
+        const buttons = document.querySelectorAll('button, div[role="button"], div[class*="btn"], svg');
+        let clicked = false;
+        
+        buttons.forEach(el => {
+            if (el.offsetParent === null) return; // Hidden
+            
+            // Check text content
+            if (el.innerText && keywords.some(k => el.innerText.includes(k))) {
+                el.click();
+                clicked = true;
+                return;
+            }
+            // Check if it's a close icon (common SVG path patterns or class names)
+            if (el.tagName === 'svg' && (el.innerHTML.includes('path') || el.getAttribute('class')?.includes('close'))) {
+                // Click the parent button if possible
+                let parent = el.closest('button') || el;
+                parent.click();
+                clicked = true;
+            }
+        });
+        return clicked;
+    """
+    try:
+        driver.execute_script(script, keywords)
+    except Exception:
+        pass
+
+def _debug_dump(driver, queue_name="error"):
+    try:
+        ts = datetime.now().strftime("%H%M%S")
+        debug_dir = os.path.join("data", "logs")
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        # 1. Save Screenshot
+        screen_path = os.path.join(debug_dir, f"tiktok_{queue_name}_{ts}.png")
+        driver.save_screenshot(screen_path)
+        
+        # 2. Save Browser Console Logs (Vital for headless debugging)
+        log_path = os.path.join(debug_dir, f"tiktok_{queue_name}_{ts}.log")
+        logs = driver.get_log('browser')
+        with open(log_path, "w", encoding="utf-8") as f:
+            for entry in logs:
+                f.write(f"{entry['level']}: {entry['message']}\n")
+                
+        logger.error(f"Debug artifacts saved: {screen_path}")
+    except Exception:
+        pass
+
+def _find_chromedriver():
+    """Auto-detect chromedriver path on Pi/Docker systems."""
     paths = [
-        shutil.which("chromedriver"),
         "/usr/bin/chromedriver",
         "/usr/lib/chromium-browser/chromedriver",
         "/usr/local/bin/chromedriver"
     ]
     for p in paths:
-        if p and os.path.exists(p):
+        if os.path.exists(p):
             return p
-    raise FileNotFoundError("Chromedriver not found. Install 'chromium-chromedriver'.")
+    # Fallback to whatever is in PATH
+    return "chromedriver"
 
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-# --- SESSION HANDLING ---
-
-def _session_bundle() -> Dict:
-    data = get_json_config(SESSION_KEY, {})
-    # Legacy migration
-    if not data and get_config(LEGACY_KEY):
-        return {
-            "sessionid": get_config(LEGACY_KEY), 
-            "valid": False, 
-            "last_verified": None
-        }
-    return data or {}
-
-def _save_bundle(bundle: Dict):
-    set_json_config(SESSION_KEY, bundle)
-    if bundle.get("sessionid"):
-        set_config(LEGACY_KEY, bundle["sessionid"])
-
-def ensure_session_valid() -> Tuple[bool, Optional[str], str]:
-    bundle = _session_bundle()
-    sid = bundle.get("sessionid")
-    if not sid: return False, None, "No Session ID"
-
-    # API Probe (Lightweight)
-    try:
-        # Randomize User-Agent slightly to avoid API blocks
-        headers = {"User-Agent": USER_AGENT, "Cookie": f"sessionid={sid}"}
-        r = requests.get("https://www.tiktok.com/passport/web/account/info/", headers=headers, timeout=10)
-        data = r.json()
-        
-        # Check if logged in
-        if data.get("data", {}).get("user_verified") or data.get("data", {}).get("username"):
-            bundle["valid"] = True
-            bundle["last_verified"] = _now_utc().isoformat()
-            _save_bundle(bundle)
-            return True, sid, "Valid"
-        else:
-            return False, sid, f"Session Invalid: {data.get('status_msg', 'Unknown')}"
-    except Exception as e:
-        logger.warning(f"Session probe failed (Network?): {e}")
-        # If network fail, assume valid if previously valid to attempt upload
-        return True, sid, "Assume Valid (Network Error)"
-
-# --- BROWSER FACTORY ---
-
-def get_driver():
-    _cleanup_zombies() # Critical for Pi 8GB stability
-    
-    opts = Options()
-    opts.add_argument("--headless=new") # Modern headless
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1920,1080")
-    
-    # Pi Optimization: Disable heavy logging and cache
-    opts.add_argument("--log-level=3")
-    opts.add_argument("--disk-cache-dir=/dev/null")
-    
-    # Anti-Detection
-    opts.add_argument(f"user-agent={USER_AGENT}")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-
-    service = Service(_get_driver_path())
-    driver = webdriver.Chrome(service=service, options=opts)
-
-    # CDP Stealth: Inject Client Hints to match User Agent
-    # This prevents "User-Agent Client Hint" mismatch detection
-    driver.execute_cdp_cmd("Network.setUserAgentOverride", {
-        "userAgent": USER_AGENT,
-        "platform": "Linux",
-        "acceptLanguage": "en-US,en;q=0.9",
-        "userAgentMetadata": {
-            "brands": [{"brand": "Not A(Brand", "version": "99"}, {"brand": "Google Chrome", "version": "121"}, {"brand": "Chromium", "version": "121"}],
-            "fullVersion": "121.0.6167.85",
-            "platform": "Linux",
-            "platformVersion": "6.5.0",
-            "architecture": "x86", # Emulate x86 even on ARM to match standard Linux UA
-            "model": "",
-            "mobile": False
-        }
-    })
-    
-    # Remove navigator.webdriver flag
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
-    })
-
-    return driver
-
-# --- UPLOAD LOGIC ---
+# --- UPLOAD FUNCTION ---
 
 def upload(video_path: str, description: str):
-    """
-    Main entry point for TikTok upload.
-    Named 'upload' to match src/platform_registry.py requirements.
-    """
-    is_valid, session_id, msg = ensure_session_valid()
-    if not is_valid:
-        return False, msg
+    ok, session_id, info = ensure_session_valid()
+    if not ok or not session_id:
+        return False, info
 
-    logger.info(f"Initializing upload for {os.path.basename(video_path)}...")
+    if not os.path.exists(video_path):
+        return False, f"File not found: {video_path}"
+
+    logger.info("Starting TikTok upload for %s...", os.path.basename(video_path))
+    
+    # --- DRIVER SETUP ---
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage") # Critical for Docker memory
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer") # Pi Optimization
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--window-size=1280,720")
+    options.add_argument(f"user-agent={USER_AGENT}")
+    
+    # Pi/Network Optimization: Eager strategy + blocking images
+    options.page_load_strategy = 'eager'
+    options.add_argument("--disk-cache-dir=/dev/null") 
+    options.add_argument("--disable-application-cache")
+    prefs = {
+        "profile.managed_default_content_settings.images": 2, # Block images
+        "profile.default_content_setting_values.notifications": 2, # Block notifications
+        "profile.default_content_settings.popups": 0
+    }
+    options.add_experimental_option("prefs", prefs)
+    
+    # Stealth
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    # Enable browser logging
+    options.set_capability('goog:loggingPrefs', {'browser': 'ALL'})
+
+    service_path = _find_chromedriver()
+    service = Service(service_path)
+    
     driver = None
-
-    try:
-        driver = get_driver()
-        
-        # 1. Auth Injection
-        driver.get("https://www.tiktok.com/login") # Load domain first
-        driver.delete_all_cookies()
-        driver.add_cookie({
-            "name": "sessionid",
-            "value": session_id,
-            "domain": ".tiktok.com",
-            "path": "/",
-            "secure": True,
-            "httpOnly": True,
-            "sameSite": "Lax"
-        })
-
-        # 2. Navigate to Upload
-        logger.debug("Navigating to upload page...")
-        driver.get("https://www.tiktok.com/upload?lang=en")
-        
-        # 3. Inject Popup Manager (The "Eagle Eye")
-        driver.execute_script(JS_POPUP_MANAGER)
-
-        # 4. Wait for Page Load & Verify Login
+    
+    # Retry Loop for the entire process (resilience against random network blips)
+    MAX_RETRIES = 2
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            WebDriverWait(driver, 20).until(
-                lambda d: "login" not in d.current_url and (
-                    d.execute_script(JS_REVEAL_INPUT) or len(d.find_elements(By.XPATH, "//input[@type='file']")) > 0
-                )
-            )
-        except TimeoutException:
-            # Check for Captcha
-            if "verify" in driver.page_source.lower() or "captcha" in driver.current_url:
-                return False, "CAPTCHA Triggered - Aborting"
-            if "login" in driver.current_url:
-                set_account_state("tiktok", False, "Session expired")
-                return False, "Redirected to Login - Session Expired"
-            return False, "Upload page failed to load"
+            if attempt > 1:
+                logger.warning(f"Retrying upload (Attempt {attempt})...")
+                if driver: 
+                    try: driver.quit() 
+                    except: pass
+            
+            driver = webdriver.Chrome(service=service, options=options)
+            
+            # Stealth JS
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            })
 
-        # 5. File Upload
-        logger.info("Sending file...")
-        file_input = driver.find_element(By.XPATH, "//input[@type='file']")
-        file_input.send_keys(os.path.abspath(video_path))
-
-        # 6. Wait for Upload Verification (The hardest part)
-        # We wait for the progress bar to complete or the text "Uploaded"
-        logger.info("Waiting for video processing...")
-        upload_success = False
-        for _ in range(30): # 60 seconds max wait for upload processing
-            src = driver.page_source
-            if "Uploaded" in src or "100%" in src or "change-video-btn" in src:
-                upload_success = True
-                break
-            time.sleep(2)
-        
-        if not upload_success:
-            return False, "Video processing timed out"
-
-        # 7. Set Description (React Safe)
-        if description:
+            # 1. Authenticate
+            driver.get("https://www.tiktok.com/404")
+            driver.add_cookie({
+                "name": "sessionid",
+                "value": session_id,
+                "domain": ".tiktok.com",
+                "path": "/",
+                "secure": True,
+                "httpOnly": True,
+                "expiry": int(time.time()) + 31536000
+            })
+            
+            # 2. Go to Upload
+            logger.debug("Navigating to upload page...")
+            driver.get("https://www.tiktok.com/upload?lang=en")
+            
+            # Wait for Title or Login Redirect
             try:
-                # Target the DraftJS editor
-                editor = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".public-DraftEditor-content"))
+                WebDriverWait(driver, 20).until(
+                    lambda d: "upload" in d.current_url or "login" in d.current_url
                 )
-                
-                # Use ActionChains for reliable typing on Pi
-                actions = ActionChains(driver)
-                actions.move_to_element(editor).click().perform()
-                time.sleep(0.5)
-                
-                # Clear existing
-                (actions
-                 .key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL)
-                 .send_keys(Keys.BACKSPACE)
-                 .perform())
-                
-                # Type new
-                actions.send_keys(description).perform()
-                time.sleep(1) # Let React state update
-            except Exception as e:
-                logger.warning(f"Could not set caption: {e}")
+            except TimeoutException:
+                pass # Continue to check logic
 
-        # 8. Copyright Check & Post
-        logger.info("Waiting for Post button...")
-        
-        # Scroll down to ensure button is in view (trigger lazy load)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        
-        try:
-            # Find the Post button
-            post_btn = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//button[contains(., 'Post')]"))
+            # 3. Validation Check
+            if "login" in driver.current_url:
+                logger.error("Session invalid: Redirected to Login.")
+                set_account_state("tiktok", False, "Session expired (Redirected)")
+                return False, "Session expired (Login Redirect)"
+
+            # 4. Handle Popups
+            _dismiss_popups_aggressively(driver)
+
+            # 5. File Input (Robust finding)
+            # Find input even if nested or hidden
+            file_input = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+            )
+            driver.execute_script("arguments[0].style.display = 'block';", file_input)
+            file_input.send_keys(os.path.abspath(video_path))
+
+            # 6. Wait for Upload Processing (Eagle Eye)
+            logger.debug("Waiting for upload processing...")
+            # We wait for the 'Change video' button, 'Uploaded' text, or 'Replace'
+            WebDriverWait(driver, 300).until(
+                EC.presence_of_element_located((By.XPATH, 
+                    "//div[contains(@class, 'uploaded')] | //div[contains(text(), 'Uploaded')] | //div[contains(text(), '100%')] | //button[contains(text(), 'Replace')]"
+                ))
             )
             
-            # Smart wait for "Disabled" state to clear (Copyright check)
-            # Pi 5 can be slow here, give it time
-            WebDriverWait(driver, 60).until(
-                lambda d: post_btn.is_enabled() and post_btn.get_attribute("disabled") is None
-            )
+            # 7. Post-Upload Popup Clearing
+            _dismiss_popups_aggressively(driver)
+
+            # 8. Caption
+            if description:
+                try:
+                    caption_box = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, ".public-DraftEditor-content, [contenteditable='true']"))
+                    )
+                    # Click to focus
+                    driver.execute_script("arguments[0].click();", caption_box)
+                    time.sleep(0.5)
+                    # Use robust injector for emojis
+                    _inject_text_via_js(driver, caption_box, description)
+                except Exception as e:
+                    logger.warning(f"Caption minor error: {e}")
+
+            # 9. Scroll Down
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+
+            # 10. Wait for Post Button Enablement (The critical part)
+            # We look for the button NOT having 'disabled' attribute or class
+            logger.info("Waiting for copyright checks...")
             
-            # Click it
+            post_btn_xpath = "//button[contains(@class, 'btn-post') or contains(text(), 'Post') or @data-e2e='post_video_button']"
+            can_click = False
+            post_btn = None
+            
+            # Polling loop (Max 90s)
+            for _ in range(90):
+                _dismiss_popups_aggressively(driver)
+                _nuke_overlays(driver)
+                
+                try:
+                    btns = driver.find_elements(By.XPATH, post_btn_xpath)
+                    if btns:
+                        post_btn = btns[0]
+                        # Check disabled state
+                        is_disabled = post_btn.get_attribute("disabled")
+                        aria_disabled = post_btn.get_attribute("aria-disabled")
+                        classes = post_btn.get_attribute("class")
+                        
+                        if is_disabled is None and aria_disabled != "true" and "disabled" not in classes:
+                            can_click = True
+                            break
+                except:
+                    pass
+                time.sleep(1)
+
+            if not can_click:
+                raise Exception("Post button never enabled (Copyright check stuck?)")
+
+            # 11. Click Post
             logger.info("Clicking Post...")
-            driver.execute_script("arguments[0].click();", post_btn)
-            
-        except TimeoutException:
-            return False, "Post button never enabled (Copyright issue?)"
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", post_btn)
+            time.sleep(1)
+            try:
+                post_btn.click()
+            except:
+                driver.execute_script("arguments[0].click();", post_btn)
 
-        # 9. Verify Success Redirect
-        try:
-            WebDriverWait(driver, 20).until(
-                lambda d: "manage" in d.current_url or "Upload another" in d.page_source
+            # 12. Verify Success
+            # Wait for redirection to profile OR "Upload another" OR "Manage posts"
+            WebDriverWait(driver, 45).until(
+                lambda d: "upload" not in d.current_url or 
+                          len(d.find_elements(By.XPATH, "//div[contains(., 'Manage your posts')]")) > 0 or
+                          len(d.find_elements(By.XPATH, "//div[contains(., 'Upload another')]")) > 0
             )
+            
             set_account_state("tiktok", True, None)
             logger.info("Upload Successful!")
-            return True, "Success"
-        except TimeoutException:
-            # Final check - sometimes it stays on same page but shows "Post published" toast
-            if "published" in driver.page_source.lower():
-                return True, "Success (Toast detected)"
-            return False, "Post clicked but no confirmation"
+            return True, "Upload Successful"
 
-    except Exception as e:
-        logger.error(f"Critical Upload Error: {e}")
-        return False, str(e)
-
-    finally:
-        if driver:
-            driver.quit()
-        _cleanup_zombies() # Clean up immediately
+        except Exception as exc:
+            err_msg = str(exc).split("\n")[0]
+            if attempt == MAX_RETRIES:
+                if driver: _debug_dump(driver, "upload_fatal")
+                logger.error(f"TikTok Upload Failed after retries: {exc}")
+                set_account_state("tiktok", False, err_msg)
+                return False, err_msg
+            else:
+                logger.warning(f"Attempt {attempt} failed: {err_msg}. Retrying...")
+                time.sleep(5)
+        
+        finally:
+            if driver:
+                try: driver.quit()
+                except: pass
