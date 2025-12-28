@@ -16,7 +16,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException,
     NoSuchElementException,
-    WebDriverException
+    WebDriverException,
+    ElementClickInterceptedException
 )
 
 from src.logging_utils import init_logging
@@ -33,6 +34,7 @@ SESSION_KEY = "tiktok_session_bundle"
 LEGACY_KEY = "tiktok_session_id"
 VERIFICATION_INTERVAL_HOURS = 6
 REFRESH_WARNING_DAYS = 25
+# Use a standard, lightweight user agent
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
 logger = init_logging("tiktok")
@@ -96,7 +98,6 @@ def session_status() -> Dict:
     }
 
 def session_connected() -> bool:
-    """Check if session is present and marked valid."""
     status = session_status()
     return bool(status["sessionid"]) and status["valid"]
 
@@ -139,44 +140,37 @@ def verify_session(force: bool = True) -> Tuple[bool, str]:
 
 # --- UTILS ---
 
-def _inject_text_via_js(driver, element, text):
-    try:
-        safe_text = json.dumps(text)
-        driver.execute_script(f"""
-            var elm = arguments[0];
-            var txt = {safe_text};
-            elm.focus();
-            if (document.execCommand('insertText', false, txt)) return;
-            elm.textContent = txt;
-            elm.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        """, element)
-    except Exception as e:
-        logger.warning(f"JS Inject failed: {e}")
-
-def _handle_popups_safely(driver):
+def _dismiss_popups(driver):
     """
-    Clicks known popups using pure XPath (No complex JS scanning).
-    This fixes CPU usage and avoids the React crash.
+    Tries to CLICK known popups/cookies regularly.
+    Does NOT remove elements from DOM (Safe for React).
     """
-    targets = [
-        "//button[contains(text(), 'Turn on')]", 
-        "//button[contains(text(), 'Allow all')]", 
+    # Common button text for dialogs
+    xpath_targets = [
+        "//button[contains(text(), 'Decline optional cookies')]",
+        "//button[contains(text(), 'Allow all')]",
         "//button[contains(text(), 'Got it')]",
         "//button[contains(text(), 'Retry')]",
-        "//div[contains(text(), 'Turn on') and contains(@class, 'button')]" 
+        "//div[contains(@class, 'cookie-banner')]//button"
     ]
     
-    for xpath in targets:
+    for xp in xpath_targets:
         try:
-            elements = driver.find_elements(By.XPATH, xpath)
+            # Only find elements that are actually visible
+            elements = driver.find_elements(By.XPATH, xp)
             for el in elements:
-                if el.is_displayed():
-                    driver.execute_script("arguments[0].click();", el)
-                    time.sleep(0.5) 
+                if el.is_displayed() and el.is_enabled():
+                    # Try standard click first
+                    try:
+                        el.click()
+                    except:
+                        # Fallback to JS click if blocked, but still clicking the correct element
+                        driver.execute_script("arguments[0].click();", el)
+                    time.sleep(0.5)
         except:
             pass
             
-    # Escape key clears many modals
+    # Escape key is a cheap way to close many modals
     try:
         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
     except:
@@ -190,12 +184,16 @@ def _debug_dump(driver, queue_name="error"):
         
         screen_path = os.path.join(debug_dir, f"tiktok_{queue_name}_{ts}.png")
         driver.save_screenshot(screen_path)
-        # Save console logs (critical for white screen debugging)
+        
         log_path = os.path.join(debug_dir, f"tiktok_{queue_name}_{ts}.log")
-        logs = driver.get_log('browser')
-        with open(log_path, "w", encoding="utf-8") as f:
-            for entry in logs:
-                f.write(f"{entry['level']}: {entry['message']}\n")
+        # Only get browser logs if available/supported
+        try:
+            logs = driver.get_log('browser')
+            with open(log_path, "w", encoding="utf-8") as f:
+                for entry in logs:
+                    f.write(f"{entry['level']}: {entry['message']}\n")
+        except:
+            pass
                 
         logger.error(f"Debug artifacts saved: {screen_path}")
     except Exception:
@@ -241,6 +239,7 @@ def upload(video_path: str, description: str):
     try:
         driver = webdriver.Chrome(service=service, options=options)
         
+        # Stealth JS
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
         })
@@ -260,22 +259,21 @@ def upload(video_path: str, description: str):
         # 2. Navigate
         driver.get("https://www.tiktok.com/upload?lang=en")
         
-        # 3. RESTORED: The "Radar" that specifically finds the iframe or input
-        # This worked in previous versions. I have brought it back.
-        logger.debug("Scanning for file input (Radar Mode)...")
+        # 3. Radar Mode (Optimized for Pi)
+        # We loop slower (every 2s) to save CPU
+        logger.debug("Scanning for file input...")
         file_input = None
         
-        # We loop for 60 seconds looking everywhere
-        for i in range(60):
-            # A. Check Main DOM
+        for i in range(30): # 60 seconds total (30 * 2)
             try:
+                # Check Main DOM
                 file_input = driver.find_element(By.XPATH, "//input[@type='file']")
                 logger.info("Found input in Main DOM.")
                 break
             except NoSuchElementException:
                 pass
             
-            # B. Check All Iframes (The critical part for 'just loads' issues)
+            # Check Iframes (Safe iteration)
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             found_in_frame = False
             for index, frame in enumerate(iframes):
@@ -295,33 +293,35 @@ def upload(video_path: str, description: str):
             if found_in_frame:
                 break
                 
-            # C. Handle potential errors if scanning failed
-            if i % 5 == 0:
-                _handle_popups_safely(driver)
+            # Periodically try to dismiss popups, but not too often
+            if i % 3 == 0:
+                _dismiss_popups(driver)
                 
-            time.sleep(1)
+            time.sleep(2) # Relaxed polling for Pi
         
         if not file_input:
             _debug_dump(driver, "input_missing")
             raise Exception("Could not locate file input (Scanned Main + All Iframes)")
 
         # 4. Upload
+        # Force display block so Selenium can interact with hidden inputs
         driver.execute_script("arguments[0].style.display = 'block';", file_input)
         file_input.send_keys(os.path.abspath(video_path))
         
+        # Wait for file to be ingested
         time.sleep(5)
         
-        # Switch back to main context
+        # Ensure we are back in main context
         driver.switch_to.default_content()
 
-        # 5. Wait for Success (Using "Edit cover" from your screenshot)
+        # 5. Wait for Processing
         logger.info("Waiting for upload processing...")
-        
         upload_success = False
-        for _ in range(120): # 2 mins max
-            # Check success triggers
+        
+        # Poll every 2 seconds, max 120s
+        for _ in range(60): 
             success_indicators = [
-                "//div[contains(text(), 'Edit cover')]", # Specific to your case
+                "//div[contains(text(), 'Edit cover')]", 
                 "//div[contains(text(), 'Uploaded')]",
                 "//button[contains(text(), 'Replace')]"
             ]
@@ -334,60 +334,101 @@ def upload(video_path: str, description: str):
             if upload_success:
                 logger.info("Upload processed.")
                 break
+            
+            if _ % 5 == 0:
+                _dismiss_popups(driver)
                 
-            _handle_popups_safely(driver) # Kill popups while waiting
-            time.sleep(1)
+            time.sleep(2) # Low CPU wait
 
         if not upload_success:
             _debug_dump(driver, "upload_timeout")
-            raise Exception("Upload timed out or blocked by popups")
+            raise Exception("Upload timed out")
 
-        # 6. Caption
+        # 6. Description / Caption (React-Safe Method)
         if description:
             try:
-                caption_box = WebDriverWait(driver, 5).until(
+                # Wait for editor
+                caption_box = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, ".public-DraftEditor-content"))
                 )
-                driver.execute_script("arguments[0].click();", caption_box)
-                time.sleep(0.5)
-                _inject_text_via_js(driver, caption_box, description)
-            except:
-                pass
+                
+                # Scroll just enough to see it
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", caption_box)
+                time.sleep(1)
+                
+                # Use ActionChains to simulate REAL user behavior.
+                # This works with React's state management.
+                actions = ActionChains(driver)
+                actions.move_to_element(caption_box).click()
+                actions.pause(0.5)
+                # Select All -> Delete (Cleanest way to clear DraftJS)
+                actions.key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL)
+                actions.pause(0.2)
+                actions.send_keys(Keys.BACKSPACE)
+                actions.pause(0.2)
+                # Type content
+                actions.send_keys(description)
+                actions.perform()
+                
+                time.sleep(1)
+            except Exception as e:
+                logger.warning(f"Caption entry failed: {e}")
 
+        # 7. Post Button Logic (Overlay-Safe)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-
-        # 7. Post Button Logic
         logger.info("Waiting for Post button...")
-        for _ in range(60):
-            _handle_popups_safely(driver)
-            
+        
+        for _ in range(30): # 60 seconds
             try:
-                btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Post')]")
+                # Try to dismiss cookies gracefully first
+                _dismiss_popups(driver)
+                
+                btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Post') or contains(text(), 'Schedule')]")
+                
                 if btns:
                     post_btn = btns[0]
-                    # Check disabled class or attribute
                     classes = post_btn.get_attribute("class")
+                    
                     if post_btn.is_enabled() and "disabled" not in classes:
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", post_btn)
-                        time.sleep(0.5)
+                        # Attempt 1: Standard Click (Best for React)
                         try:
+                            # Scroll center to hopefully move it away from bottom banners
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", post_btn)
+                            time.sleep(1) 
                             post_btn.click()
-                        except:
+                        except (ElementClickInterceptedException, WebDriverException):
+                            # Attempt 2: JS Click Bypass
+                            # If the cookie banner blocks the click, this executes the click 
+                            # directly on the button element, ignoring the overlay.
+                            # NO DOM deletion required.
+                            logger.info("Standard click blocked, using JS bypass...")
                             driver.execute_script("arguments[0].click();", post_btn)
+                        
+                        logger.info("Post button clicked.")
                         break
-            except:
+            except Exception:
                 pass
-            time.sleep(1)
+                
+            time.sleep(2) # Wait before retry
 
         # 8. Final Verification
-        WebDriverWait(driver, 45).until(
-            lambda d: "upload" not in d.current_url or 
-                      len(d.find_elements(By.XPATH, "//div[contains(., 'Manage your posts')]")) > 0
-        )
-        
-        set_account_state("tiktok", True, None)
-        logger.info("Upload Successful!")
-        return True, "Upload Successful"
+        try:
+            WebDriverWait(driver, 60).until(
+                lambda d: "upload" not in d.current_url or 
+                          len(d.find_elements(By.XPATH, "//div[contains(., 'Manage your posts')]")) > 0 or
+                          len(d.find_elements(By.XPATH, "//div[contains(., 'Upload another video')]")) > 0
+            )
+            set_account_state("tiktok", True, None)
+            logger.info("Upload Successful!")
+            return True, "Upload Successful"
+        except TimeoutException:
+            # Check one last time if we are redirected
+            if "upload" not in driver.current_url:
+                set_account_state("tiktok", True, None)
+                return True, "Upload Successful (Url Changed)"
+            
+            _debug_dump(driver, "post_verification_timeout")
+            raise Exception("Post button clicked but verification timed out")
 
     except Exception as exc:
         err_msg = str(exc).split("\n")[0]
