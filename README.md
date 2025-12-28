@@ -55,11 +55,11 @@ python run_worker.py   # worker (separate shell)
 - **TikTok**
   - Paste `sessionid` in Accounts → TikTok. Accepted formats: raw value (`123...`), cookie header (`sessionid=123...; path=/;`), or DevTools JSON export containing `cookies`/`sessionid`. Verify to confirm; the worker blocks uploads if invalid.
 - **Telegram (optional)**
-  - Add bot token + chat ID in Settings. Alerts fire on failures/auth gaps and when the queue auto-pauses.
+  - Add bot token + chat ID in Settings. Alerts fire on failures/auth gaps.
 
 ### Daily flow
 - Upload & Queue: drop multiple mp4/mov files. One title/description/time applies to all; videos and platform order are randomized to avoid simultaneous posting. Preview clips inline.
-- Queue controls: Pause/Resume uploads, “Upload next now” to force the next item, “Push to next slot” per item, auto-pause on failures with Telegram alert.
+- Queue controls: Pause/Resume uploads, “Upload next now” to force the next item, “Push to next slot” per item; failures are logged/alerted without stopping the queue.
 - Storage: dashboard shows free/used space; “Clean oldest uploads” deletes already-posted files first.
 - Logs: view/download `data/logs/scheduler.log` from the Logs tab.
 

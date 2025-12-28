@@ -292,7 +292,14 @@ def render_queue_tab(queue_rows):
     # -- Queue Table --
     st.markdown("### Queue")
     df = ui_logic.format_queue_dataframe(queue_rows)
-    st.dataframe(df, width="stretch", hide_index=True)
+    st.dataframe(
+        df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Last Error": st.column_config.TextColumn("Last Error", width="large")
+        },
+    )
 
     # -- Item Management --
     if queue_rows:

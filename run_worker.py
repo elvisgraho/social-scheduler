@@ -248,16 +248,16 @@ def process_video(video: dict) -> None:
         error_msg = "; ".join(parts) if parts else "Awaiting account connections."
 
         update_queue_status(queue_id, "failed", error_msg, current_logs)
+        # Halt the queue after a failure but keep the failed item visible for manual action.
         set_config(PAUSE_KEY, 1)
 
-        logger.error("Upload halted for queue #%s: %s", queue_id, error_msg)
+        logger.error("Upload failed; queue paused for #%s: %s", queue_id, error_msg)
         try:
             import json as _json
             logger.error("failure_detail=%s", _json.dumps({"queue_id": queue_id, "failures": failures, "missing": missing_accounts}))
         except Exception:
             pass
-
-        _notify(f"Queue #{queue_id} paused: {error_msg}")
+        _notify(f"Queue paused after failure on #{queue_id}: {error_msg}")
         return
 
     # Success

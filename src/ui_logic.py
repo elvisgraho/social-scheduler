@@ -10,7 +10,7 @@ import pandas as pd
 import pytz
 
 # Imports from your existing modules
-from src.database import add_to_queue, get_config, reschedule_queue_item
+from src.database import add_to_queue, get_config, reschedule_queue_item, update_queue_status
 from src.scheduling import get_schedule, next_daily_slots
 
 logger = logging.getLogger("ui_logic")
@@ -57,19 +57,17 @@ def get_schedule_start_time(queue_rows: List[Dict[str, Any]]) -> datetime:
 
 def occupied_schedule_dates(queue_rows: List[Dict[str, Any]]) -> set:
     """
-    Return set of YYYY-MM-DD strings already scheduled for pending/retry/processing items.
+    Return set of YYYY-MM-DD strings already scheduled for active items.
+    Includes failed rows so new/rescheduled items don't land on the same day.
     """
     dates = set()
     for row in queue_rows:
-        if row.get("status") not in ("pending", "retry", "processing"):
+        if row.get("status") not in ("pending", "retry", "processing", "failed"):
             continue
         dt = parse_iso(row.get("scheduled_for"))
         if not dt:
             continue
-        if dt.tzinfo:
-            dt = dt.date()
-        else:
-            dt = dt.date()
+        dt = dt.date()
         dates.add(dt.isoformat())
     return dates
 
@@ -230,14 +228,32 @@ def get_storage_summary(data_dir: Path) -> Tuple[Optional[float], Optional[float
         return None, None, None, None
 
 
+def _parse_logs(log_value: Any) -> Dict[str, Any]:
+    """
+    Normalize platform_logs into a dict so we can re-store without double-encoding.
+    """
+    if not log_value:
+        return {}
+    if isinstance(log_value, dict):
+        return log_value
+    if isinstance(log_value, str):
+        try:
+            parsed = json.loads(log_value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
 def reschedule_pending_items(
     queue_rows: List[Dict[str, Any]], start: Optional[datetime] = None
 ) -> Tuple[int, Optional[datetime]]:
     """
-    Move all pending/retry items to the next available schedule slots.
+    Move all pending/retry/failed items to the next available schedule slots.
+    Failed items are re-marked as retry so they re-enter the worker.
     Returns (count_rescheduled, first_slot_used).
     """
-    pending_items = [row for row in queue_rows if row.get("status") in ("pending", "retry")]
+    pending_items = [row for row in queue_rows if row.get("status") in ("pending", "retry", "failed")]
     if not pending_items:
         return 0, None
 
@@ -253,13 +269,15 @@ def reschedule_pending_items(
     else:
         anchor = anchor.astimezone(tz)
 
-    # Only block dates currently in-flight (processing); pending/retry items are being rescheduled.
+    # Block any dates belonging to items that are not being rescheduled (e.g., processing).
     occupied: set[str] = set()
+    rescheduled_statuses = {"pending", "retry", "failed"}
     for row in queue_rows:
-        if row.get("status") == "processing":
-            dt = parse_iso(row.get("scheduled_for"))
-            if dt:
-                occupied.add(dt.date().isoformat())
+        if row.get("status") in rescheduled_statuses:
+            continue
+        dt = parse_iso(row.get("scheduled_for"))
+        if dt:
+            occupied.add(dt.date().isoformat())
 
     slots = next_daily_slots(len(pending_items), start=anchor, occupied_dates=occupied)
     if not slots:
@@ -274,6 +292,14 @@ def reschedule_pending_items(
     pending_sorted = sorted(pending_items, key=_scheduled_key)
     rescheduled = 0
     for row, slot in zip(pending_sorted, slots):
+        # Reactivate failed items by marking them as retry while preserving error/logs context.
+        if row.get("status") == "failed":
+            update_queue_status(
+                row["id"],
+                "retry",
+                row.get("last_error"),
+                _parse_logs(row.get("platform_logs")),
+            )
         reschedule_queue_item(row["id"], slot.isoformat())
         rescheduled += 1
         occupied.add(slot.date().isoformat())
