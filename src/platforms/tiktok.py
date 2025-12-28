@@ -169,7 +169,7 @@ def _browser_log(driver, message):
         # In case driver is closed or script fails
         logger.info(message)
 
-def _dismiss_blocking_elements(driver) -> bool:
+def _dismiss_blocking_elements(driver, check_shadow=False) -> bool:
     """
     Clears popups. Returns True if something was dismissed.
     Includes logic for: Exit Modal, Shadow Cookies, and 'Post now' Confirmation.
@@ -217,30 +217,31 @@ def _dismiss_blocking_elements(driver) -> bool:
 
     # 3. SHADOW COOKIES (Heavy JS - Only runs if needed, or periodically)
     # We rely on the calling loop to not call this excessively
-    try:
-        driver.execute_script("""
-            function clickShadowCookies(root) {
-                try {
-                    // Use querySelectorAll which is faster than iterating everything
-                    let buttons = root.querySelectorAll('button');
-                    buttons.forEach(b => {
-                        let txt = b.innerText.toLowerCase();
-                        if (txt.includes('allow all') || txt.includes('decline optional')) {
-                            if (b.offsetParent !== null) b.click();
-                        }
-                    });
-                } catch(e) {}
-                try {
-                    // Only traverse open shadow roots
-                    let all = root.querySelectorAll('*');
-                    all.forEach(el => {
-                        if (el.shadowRoot) clickShadowCookies(el.shadowRoot);
-                    });
-                } catch(e) {}
-            }
-            clickShadowCookies(document);
-        """)
-    except: pass
+    if check_shadow:
+        try:
+            driver.execute_script("""
+                function clickShadowCookies(root) {
+                    try {
+                        // Use querySelectorAll which is faster than iterating everything
+                        let buttons = root.querySelectorAll('button');
+                        buttons.forEach(b => {
+                            let txt = b.innerText.toLowerCase();
+                            if (txt.includes('allow all') || txt.includes('decline optional')) {
+                                if (b.offsetParent !== null) b.click();
+                            }
+                        });
+                    } catch(e) {}
+                    try {
+                        // Only traverse open shadow roots
+                        let all = root.querySelectorAll('*');
+                        all.forEach(el => {
+                            if (el.shadowRoot) clickShadowCookies(el.shadowRoot);
+                        });
+                    } catch(e) {}
+                }
+                clickShadowCookies(document);
+            """)
+        except: pass
 
     # 4. STANDARD POPUPS (Fast XPath)
     xpath_targets = [
@@ -450,7 +451,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         
         for _ in range(30):
             try:
-                if _dismiss_blocking_elements(driver):
+                if _dismiss_blocking_elements(driver, check_shadow=False):
                     time.sleep(1) 
                     continue
 
@@ -468,7 +469,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                         time.sleep(1.5) 
                         
                         # Last check for modals before clicking
-                        if _dismiss_blocking_elements(driver):
+                        if _dismiss_blocking_elements(driver, check_shadow=False):
                             _browser_log(driver, "Modal appeared during scroll - dismissed, retrying...")
                             continue
 
