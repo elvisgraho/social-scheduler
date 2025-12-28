@@ -253,7 +253,14 @@ def reschedule_pending_items(
     else:
         anchor = anchor.astimezone(tz)
 
-    occupied = occupied_schedule_dates(queue_rows)
+    # Only block dates currently in-flight (processing); pending/retry items are being rescheduled.
+    occupied: set[str] = set()
+    for row in queue_rows:
+        if row.get("status") == "processing":
+            dt = parse_iso(row.get("scheduled_for"))
+            if dt:
+                occupied.add(dt.date().isoformat())
+
     slots = next_daily_slots(len(pending_items), start=anchor, occupied_dates=occupied)
     if not slots:
         return 0, None
