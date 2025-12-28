@@ -124,23 +124,15 @@ def upload(video_path: str, description: str):
 
     logger.info("Starting TikTok upload for %s via library...", os.path.basename(video_path))
 
-    # 2. Bridge your session_id to the library's cookie format
-    cookies_list = [{
-        "name": "sessionid",
-        "value": session_id,
-        "domain": ".tiktok.com",
-        "path": "/",
-        "secure": True,
-        "httpOnly": True
-    }]
-
     try:
         # 3. Use the robust external library
+        # FIX: We pass 'sessionid' directly. The library handles the cookie creation.
+        # Passing 'cookies' as a list caused the "expected str/bytes/PathLike" error.
         failed = upload_video(
             filename=video_path,
             description=description or "",
-            cookies=cookies_list,
-            headless=True  # Run in background
+            sessionid=session_id, 
+            headless=True
         )
 
         if not failed:

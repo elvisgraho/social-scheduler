@@ -17,7 +17,7 @@ from src.database import (
     update_queue_status,
     reschedule_queue_item,
 )
-from src.logging_utils import init_logging
+from src.logging_utils import init_logging, log_once
 from src.notifier import send_telegram_message
 from src.platform_registry import get_platforms
 from src.auth_utils import verify_youtube_credentials
@@ -26,7 +26,7 @@ from src.platforms import tiktok as tiktok_platform
 from src.scheduling import get_schedule, next_daily_slots
 
 logger = init_logging("worker")
-from src.logging_utils import log_once
+
 WORKER_BUSY = False
 PAUSE_KEY = "queue_paused"
 FORCE_KEY = "queue_force_run"
@@ -143,6 +143,25 @@ def _preflight_platform(platform_key: str) -> tuple[bool, str]:
     if platform_key == "tiktok":
         return tiktok_platform.verify_session(force=True)
     return True, ""
+
+
+def reset_stale_tasks():
+    """
+    CRITICAL FIX: Reset tasks stuck in 'processing' due to worker crash/restart.
+    This prevents items from getting stuck forever if the container dies during upload.
+    """
+    try:
+        # Get all tasks, filter manually or rely on DB status
+        all_items = get_queue(limit=1000)
+        stale_tasks = [r for r in all_items if r["status"] == "processing"]
+        
+        if stale_tasks:
+            logger.warning(f"Found {len(stale_tasks)} stale 'processing' tasks on startup. Resetting to 'pending'.")
+            for task in stale_tasks:
+                # Keep logs, just reset status so it tries again
+                update_queue_status(task["id"], "pending", None, task.get("platform_logs"))
+    except Exception as e:
+        logger.error(f"Failed to reset stale tasks: {e}")
 
 
 def process_video(video: dict) -> None:
@@ -319,6 +338,9 @@ def check_and_post():
 def main():
     log_once(logger, "worker_started", "Scheduler worker started.")
     init_db()
+    
+    reset_stale_tasks()
+    
     schedule.every(1).minutes.do(check_and_post)
     while True:
         schedule.run_pending()

@@ -4,7 +4,7 @@ import random
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Set
 
 import pandas as pd
 import pytz
@@ -30,7 +30,6 @@ def get_schedule_start_time(queue_rows: List[Dict[str, Any]]) -> datetime:
     Returns the later of 'now' or the 'latest scheduled item'.
     """
     cfg = get_schedule()
-    # Fallback to UTC if timezone is missing or invalid
     try:
         tz = pytz.timezone(cfg.get("timezone", "UTC"))
     except pytz.UnknownTimeZoneError:
@@ -40,6 +39,9 @@ def get_schedule_start_time(queue_rows: List[Dict[str, Any]]) -> datetime:
     
     scheduled_times = []
     for row in queue_rows:
+        if row.get("status") in ("uploaded", "failed"):
+            continue # Ignore completed/failed items for future scheduling anchor
+            
         dt = parse_iso(row.get("scheduled_for"))
         if dt:
             # Ensure the parsed time is timezone-aware for comparison
@@ -55,7 +57,7 @@ def get_schedule_start_time(queue_rows: List[Dict[str, Any]]) -> datetime:
     return max(latest_scheduled, now)
 
 
-def occupied_schedule_dates(queue_rows: List[Dict[str, Any]]) -> set:
+def occupied_schedule_dates(queue_rows: List[Dict[str, Any]]) -> Set[str]:
     """
     Return set of YYYY-MM-DD strings already scheduled for active items.
     Includes failed rows so new/rescheduled items don't land on the same day.
@@ -78,7 +80,7 @@ def format_queue_dataframe(queue_rows: List[Dict[str, Any]]) -> pd.DataFrame:
         data.append({
             "ID": row["id"],
             "File": Path(row["file_path"]).name,
-            "Scheduled": row.get("scheduled_for") or "None",
+            "Scheduled": format_datetime_for_ui(row.get("scheduled_for")),
             "Status": row.get("status"),
             "Attempts": row.get("attempts", 0),
             "Last Error": row.get("last_error") or "",
@@ -145,7 +147,7 @@ def save_files_to_queue(
 
     return success_count
 
-def format_datetime_for_ui(value: str) -> str:
+def format_datetime_for_ui(value: Optional[str]) -> str:
     """Formats an ISO string into a human-readable local time string."""
     dt = parse_iso(value)
     if not dt:
@@ -270,7 +272,7 @@ def reschedule_pending_items(
         anchor = anchor.astimezone(tz)
 
     # Block any dates belonging to items that are not being rescheduled (e.g., processing).
-    occupied: set[str] = set()
+    occupied: Set[str] = set()
     rescheduled_statuses = {"pending", "retry", "failed"}
     for row in queue_rows:
         if row.get("status") in rescheduled_statuses:
@@ -291,15 +293,24 @@ def reschedule_pending_items(
 
     pending_sorted = sorted(pending_items, key=_scheduled_key)
     rescheduled = 0
+    
     for row, slot in zip(pending_sorted, slots):
-        # Reactivate failed items by marking them as retry while preserving error/logs context.
+        # Reactivate failed items by marking them as retry while preserving logs context.
+        # We handle logs parsing here to avoid double-stringification in update_queue_status
+        current_logs = _parse_logs(row.get("platform_logs"))
+        
+        status_to_set = "retry" if row.get("status") == "failed" else row.get("status")
+        
+        # 1. Update status if changing from failed -> retry
         if row.get("status") == "failed":
             update_queue_status(
                 row["id"],
                 "retry",
                 row.get("last_error"),
-                _parse_logs(row.get("platform_logs")),
+                current_logs,
             )
+            
+        # 2. Update time
         reschedule_queue_item(row["id"], slot.isoformat())
         rescheduled += 1
         occupied.add(slot.date().isoformat())

@@ -2,6 +2,7 @@ import json
 import streamlit as st
 import pytz
 from pathlib import Path
+from urllib.parse import unquote  # Fix for encoded cookies
 
 # --- Configuration & Init ---
 st.set_page_config(page_title="Social Scheduler", page_icon="SS", layout="centered")
@@ -58,14 +59,23 @@ def refresh_platform_statuses():
     Actively re-check platform connectivity so the badge row reflects current reality.
     """
     results = []
-    yt_ok, yt_msg = verify_youtube_credentials(probe_api=True)
-    results.append(("YouTube", yt_ok, yt_msg))
+    try:
+        yt_ok, yt_msg = verify_youtube_credentials(probe_api=True)
+        results.append(("YouTube", yt_ok, yt_msg))
+    except Exception as e:
+        results.append(("YouTube", False, str(e)))
 
-    ig_ok, ig_msg = instagram_platform.verify_login()
-    results.append(("Instagram", ig_ok, ig_msg))
+    try:
+        ig_ok, ig_msg = instagram_platform.verify_login()
+        results.append(("Instagram", ig_ok, ig_msg))
+    except Exception as e:
+        results.append(("Instagram", False, str(e)))
 
-    tt_ok, tt_msg = tiktok_platform.verify_session(force=True)
-    results.append(("TikTok", tt_ok, tt_msg))
+    try:
+        tt_ok, tt_msg = tiktok_platform.verify_session(force=True)
+        results.append(("TikTok", tt_ok, tt_msg))
+    except Exception as e:
+        results.append(("TikTok", False, str(e)))
 
     return results
 
@@ -75,7 +85,8 @@ def render_platform_status_badge():
     st.caption("Connections")
     refresh_col, _ = st.columns([1, 3])
     if refresh_col.button("Refresh statuses"):
-        st.session_state["status_results"] = refresh_platform_statuses()
+        with st.spinner("Checking connections..."):
+            st.session_state["status_results"] = refresh_platform_statuses()
         st.rerun()
 
     statuses = all_platform_statuses()
@@ -111,9 +122,12 @@ def render_platform_status_badge():
 def render_dashboard_tab(queue_rows):
     st.subheader("Status Overview")
     
-    pending = sum(1 for row in queue_rows if row["status"] in ("pending", "retry"))
-    processing = sum(1 for row in queue_rows if row["status"] == "processing")
-    uploaded = sum(1 for row in queue_rows if row["status"] == "uploaded")
+    try:
+        pending = sum(1 for row in queue_rows if row["status"] in ("pending", "retry"))
+        processing = sum(1 for row in queue_rows if row["status"] == "processing")
+        uploaded = sum(1 for row in queue_rows if row["status"] == "uploaded")
+    except Exception:
+        pending, processing, uploaded = 0, 0, 0
     
     # Metrics
     metrics = st.columns(4)
@@ -169,6 +183,7 @@ def render_dashboard_tab(queue_rows):
 def render_queue_tab(queue_rows):
     st.subheader("Upload & Queue")
 
+    # Display Notice (persisted across reruns)
     notice = st.session_state.pop("queue_notice", None)
     if isinstance(notice, dict):
         level = notice.get("level", "info")
@@ -225,8 +240,9 @@ def render_queue_tab(queue_rows):
         elif st.session_state.get("force_now_confirmed"):
             set_config("queue_force_run", 1)
             logger.info("Force upload requested via UI.")
-            st.success("Next item will be processed immediately.")
+            st.session_state["queue_notice"] = {"level": "success", "text": "Next item will be processed immediately."}
             st.session_state["force_now_confirmed"] = False
+            st.rerun()
         else:
             st.warning("Click again to confirm immediate upload.")
             st.session_state["force_now_confirmed"] = True
@@ -264,7 +280,6 @@ def render_queue_tab(queue_rows):
         
         if len(slots) < len(uploaded_files):
             st.error(f"Not enough schedule slots available in the next 90 days. Needed {len(uploaded_files)}, found {len(slots)}.")
-            logger.warning("Queue request rejected: %s uploads, only %s slots available.", len(uploaded_files), len(slots))
         else:
             readable_slots = "\n".join(slot.strftime("%b %d %H:%M %Z") for slot in slots)
             st.write("Videos will be scheduled for:")
@@ -275,18 +290,25 @@ def render_queue_tab(queue_rows):
                 preview_cols[idx].video(uploaded)
 
             sig = _uploads_signature(uploaded_files)
+            # If signature changed, process new files
             if st.session_state.get("queued_sig") != sig:
                 logger.info("Queuing %s new videos.", len(uploaded_files))
                 count = ui_logic.save_files_to_queue(uploaded_files, slots, UPLOAD_DIR, shuffle_order)
+                
                 if count > 0:
                     st.session_state["queued_sig"] = sig
-                    st.success(f"Automatically queued {count} videos.")
+                    # FIX: Use session state for notice to persist across rerun
+                    st.session_state["queue_notice"] = {
+                        "level": "success", 
+                        "text": f"Automatically queued {count} videos."
+                    }
                     st.rerun()
                 else:
                     st.error("Failed to queue videos. Check logs.")
             else:
                 st.info("Uploads already added to the queue.")
     else:
+        # Clear signature if user cleared files
         st.session_state.pop("queued_sig", None)
 
     # -- Queue Table --
@@ -479,7 +501,15 @@ def render_accounts_tab():
         st.caption("Paste `sessionid` cookie value or exported JSON.")
         tt_input = st.text_area("Input", value=tt_status.get("sessionid", ""), height=100)
         if st.form_submit_button("Save TikTok Session"):
-            clean_session = ui_logic.extract_tiktok_session(tt_input)
+            # FIX: Handle URL encoded cookies
+            raw_input = tt_input.strip()
+            if "%" in raw_input:
+                try:
+                    raw_input = unquote(raw_input)
+                except Exception:
+                    pass
+
+            clean_session = ui_logic.extract_tiktok_session(raw_input)
             if not clean_session:
                 st.warning("Could not find sessionid in input.")
             else:

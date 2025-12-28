@@ -65,6 +65,9 @@ def init_db() -> None:
 
 
 def _ensure_queue_columns(conn: sqlite3.Connection) -> None:
+    """
+    Migration helper to ensure existing databases get new columns.
+    """
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(queue)")}
     columns = {
         "scheduled_for": "ALTER TABLE queue ADD COLUMN scheduled_for TEXT",
@@ -107,7 +110,8 @@ def get_json_config(key: str, default: Optional[Dict[str, Any]] = None) -> Dict[
         return default or {}
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
+        # Fallback for corrupted JSON or empty strings
         return default or {}
 
 
@@ -148,6 +152,7 @@ def add_many_to_queue(entries: Iterable[Dict[str, Any]]) -> List[int]:
     conn.commit()
     last_id = cur.lastrowid or 0
     conn.close()
+    # Estimate ID range
     first_id = last_id - len(payload) + 1
     return list(range(first_id, last_id + 1))
 
@@ -171,6 +176,7 @@ def get_queue(limit: int = 100) -> List[Dict[str, Any]]:
 
 def get_due_queue(now_iso: str) -> List[Dict[str, Any]]:
     conn = get_conn()
+    # Prioritize items that are pending/retry and whose schedule time has passed
     rows = conn.execute(
         """
         SELECT * FROM queue
