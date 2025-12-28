@@ -145,7 +145,7 @@ def verify_session(force: bool = True) -> Tuple[bool, str]:
 def _inject_text_via_js(driver, element, text):
     """
     Safely injects text (including Emojis) into a contenteditable or input
-    using Clipboard API simulation. This fixes 'broken emoji' issues on Linux.
+    using Clipboard API simulation.
     """
     try:
         safe_text = json.dumps(text)
@@ -183,7 +183,7 @@ def _nuke_overlays(driver):
 def _dismiss_popups_aggressively(driver):
     """
     Eagle Eye: Scans for text buttons, close icons, and hits ESCAPE.
-    Includes specific fix for 'Turn on automatic content checks'.
+    Includes specific fix for 'Turn on automatic content checks' and Cookie Banners.
     """
     # 1. Hit Escape (Standard accessibility close)
     try:
@@ -192,11 +192,11 @@ def _dismiss_popups_aggressively(driver):
         pass
 
     # 2. Click specific text buttons or Close SVGs
-    # Added "Turn on" and "Cancel" specifically for the content check modal
-    keywords = ["Turn on", "Allow all", "Decline", "Got it", "Reload", "Upload", "Close", "No thanks", "Cancel"]
+    # Added "Turn on", "Allow all" for cookies, "Cancel"
+    keywords = ["Turn on", "Allow all", "Decline", "Got it", "Reload", "Upload", "Close", "No thanks", "Cancel", "Accept"]
     script = """
         const keywords = arguments[0];
-        const buttons = document.querySelectorAll('button, div[role="button"], div[class*="btn"], svg');
+        const buttons = document.querySelectorAll('button, div[role="button"], div[class*="btn"], a[role="button"], svg');
         let clicked = false;
         
         buttons.forEach(el => {
@@ -204,12 +204,14 @@ def _dismiss_popups_aggressively(driver):
             
             // Check text content
             if (el.innerText && keywords.some(k => el.innerText.includes(k))) {
-                // Prioritize "Turn on" if it is red (often primary action for settings)
+                // Ensure we don't click the "Post" button by accident here
+                if (el.innerText.includes("Post")) return;
+                
                 el.click();
                 clicked = true;
                 return;
             }
-            // Check if it's a close icon
+            // Check if it's a close icon (SVG)
             if (el.tagName === 'svg' && (el.innerHTML.includes('path') || el.getAttribute('class')?.includes('close'))) {
                 let parent = el.closest('button') || el;
                 parent.click();
@@ -271,21 +273,22 @@ def upload(video_path: str, description: str):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage") 
     options.add_argument("--disable-gpu")
-    options.add_argument("--disable-software-rasterizer")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-extensions")
-    options.add_argument("--window-size=1280,720")
+    # Increase window size to ensure layout loads correctly (prevents mobile layout)
+    options.add_argument("--window-size=1920,1080")
     options.add_argument(f"user-agent={USER_AGENT}")
     
-    options.page_load_strategy = 'eager'
-    options.add_argument("--disk-cache-dir=/dev/null") 
-    options.add_argument("--disable-application-cache")
-    prefs = {
-        "profile.managed_default_content_settings.images": 2, 
-        "profile.default_content_setting_values.notifications": 2, 
-        "profile.default_content_settings.popups": 0
-    }
-    options.add_experimental_option("prefs", prefs)
+    # FIX WHITE SCREEN: 
+    # 1. Do NOT block images/CSS (this triggers bot detection and breaks React)
+    # 2. Set Timezone explicitly to fix the "Timezone UTC not found" crash
+    options.add_argument("--lang=en-US")
+    # We set a standard timezone to avoid the Intl error
+    options.add_argument("--timezone=Europe/Berlin") 
+    
+    # Standard page load (removed 'eager' to allow React to hydrate completely)
+    options.page_load_strategy = 'normal'
+    
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -296,16 +299,16 @@ def upload(video_path: str, description: str):
     
     driver = None
     
-    # NO RETRY LOOP - Single Attempt
     try:
         driver = webdriver.Chrome(service=service, options=options)
         
+        # Stealth
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
         })
 
         # 1. Authenticate
-        driver.get("https://www.tiktok.com/404")
+        driver.get("https://www.tiktok.com")
         driver.add_cookie({
             "name": "sessionid",
             "value": session_id,
@@ -320,28 +323,36 @@ def upload(video_path: str, description: str):
         logger.debug("Navigating to upload page...")
         driver.get("https://www.tiktok.com/upload?lang=en")
         
-        # Wait for potential redirects (Login check)
+        # 3. SELF-HEALING: Check for White Screen / React Crash
         try:
-            WebDriverWait(driver, 10).until(lambda d: "upload" in d.current_url or "login" in d.current_url)
+            # Wait for either the iframe, the file input, OR the login redirect
+            # We specifically look for "Select file" text or the input
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='file'] | //div[contains(text(), 'Select')] | //iframe"))
+            )
         except TimeoutException:
-            pass
+            logger.warning("White screen detected (React crash or timeout). Refreshing once...")
+            driver.refresh()
+            # Wait longer after refresh
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='file'] | //div[contains(text(), 'Select')] | //iframe"))
+            )
 
         if "login" in driver.current_url:
             logger.error("Session invalid: Redirected to Login.")
             set_account_state("tiktok", False, "Session expired (Redirected)")
             return False, "Session expired (Login Redirect)"
 
-        # 3. Handle Initial Popups
+        # 4. Handle Initial Popups (Cookies, etc)
         _dismiss_popups_aggressively(driver)
 
-        # 4. Find File Input (Handle Iframe Mode if necessary)
+        # 5. Find File Input (Smart Switcher for Iframe Mode)
         file_input = None
         try:
-            # First, check main document
+            # Check main document first
             file_input = driver.find_element(By.XPATH, "//input[@type='file']")
         except NoSuchElementException:
-            # If not found, check if we are in iframe mode (as per logs)
-            logger.debug("Input not found in main doc, checking frames...")
+            logger.debug("Input not found in main doc, scanning iframes...")
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             for frame in iframes:
                 try:
@@ -353,32 +364,33 @@ def upload(video_path: str, description: str):
                     driver.switch_to.default_content()
         
         if not file_input:
+            _debug_dump(driver, "input_missing")
             raise Exception("Could not locate file input (Iframe or Main)")
 
-        # 5. Upload File
+        # 6. Upload File
+        # Make visible just in case
         driver.execute_script("arguments[0].style.display = 'block';", file_input)
         file_input.send_keys(os.path.abspath(video_path))
-        # Important: Pause to allow browser to lock file handle before scripts run
-        time.sleep(2)
+        
+        # Vital: Pause to allow file handle lock and thumbnail generation
+        time.sleep(3)
 
-        # Switch back to default if we were in a frame
+        # Switch back to default content if we were in a frame
         driver.switch_to.default_content()
 
-        # 6. Wait for Upload Processing
+        # 7. Wait for Upload Processing
         logger.debug("Waiting for upload processing...")
-        # Note: 'ERR_FILE_NOT_FOUND' in logs usually means thumbnail generation failed, 
-        # but the video might still upload. We rely on UI state changes.
+        # TikTok might change the UI to "Uploaded" or show a progress bar
         WebDriverWait(driver, 300).until(
             EC.presence_of_element_located((By.XPATH, 
                 "//div[contains(@class, 'uploaded')] | //div[contains(text(), 'Uploaded')] | //div[contains(text(), '100%')] | //button[contains(text(), 'Replace')]"
             ))
         )
         
-        # 7. Post-Upload Popup Clearing (Crucial for 'Content Check' modal)
-        # This will target the "Turn on" button seen in your logs/screenshot
+        # 8. Post-Upload Popup Clearing (Targets "Turn on" content check)
         _dismiss_popups_aggressively(driver)
 
-        # 8. Caption
+        # 9. Caption
         if description:
             try:
                 caption_box = WebDriverWait(driver, 10).until(
@@ -392,15 +404,14 @@ def upload(video_path: str, description: str):
 
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
 
-        # 9. Wait for Post Button Enablement
+        # 10. Wait for Post Button Enablement
         logger.info("Waiting for copyright checks...")
         post_btn_xpath = "//button[contains(@class, 'btn-post') or contains(text(), 'Post') or @data-e2e='post_video_button']"
         can_click = False
         post_btn = None
         
-        # Single loop, no retries, but wait for the button to become ready
+        # 90 second wait for copyright check
         for _ in range(90):
-            # Continuously kill the "Turn on" popup if it reappears
             _dismiss_popups_aggressively(driver)
             _nuke_overlays(driver)
             
@@ -408,6 +419,7 @@ def upload(video_path: str, description: str):
                 btns = driver.find_elements(By.XPATH, post_btn_xpath)
                 if btns:
                     post_btn = btns[0]
+                    # Check visual disabled state
                     is_disabled = post_btn.get_attribute("disabled")
                     aria_disabled = post_btn.get_attribute("aria-disabled")
                     classes = post_btn.get_attribute("class")
@@ -420,24 +432,31 @@ def upload(video_path: str, description: str):
             time.sleep(1)
 
         if not can_click:
-            # One last aggressive popup clear before giving up
+            # One last try to clear popups
             _dismiss_popups_aggressively(driver)
-            raise Exception("Post button never enabled (Copyright check stuck or popup blocking)")
+            if post_btn:
+                 # Try force click via JS even if disabled (sometimes works if UI is just lagging)
+                 driver.execute_script("arguments[0].click();", post_btn)
+            else:
+                _debug_dump(driver, "post_button_missing")
+                raise Exception("Post button not ready")
 
-        # 10. Click Post
-        logger.info("Clicking Post...")
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", post_btn)
-        time.sleep(1)
-        try:
-            post_btn.click()
-        except:
-            driver.execute_script("arguments[0].click();", post_btn)
+        # 11. Click Post
+        if can_click and post_btn:
+            logger.info("Clicking Post...")
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", post_btn)
+            time.sleep(1)
+            try:
+                post_btn.click()
+            except:
+                driver.execute_script("arguments[0].click();", post_btn)
 
-        # 11. Verify Success
-        WebDriverWait(driver, 45).until(
+        # 12. Verify Success
+        WebDriverWait(driver, 60).until(
             lambda d: "upload" not in d.current_url or 
                       len(d.find_elements(By.XPATH, "//div[contains(., 'Manage your posts')]")) > 0 or
-                      len(d.find_elements(By.XPATH, "//div[contains(., 'Upload another')]")) > 0
+                      len(d.find_elements(By.XPATH, "//div[contains(., 'Upload another')]")) > 0 or
+                      len(d.find_elements(By.XPATH, "//div[contains(., 'View profile')]")) > 0
         )
         
         set_account_state("tiktok", True, None)
