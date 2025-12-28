@@ -20,7 +20,11 @@ docker run -d --name scheduler \
   -p 8501:8501 \
   -v $(pwd)/data:/app/data \
   --restart unless-stopped \
+  --shm-size=2g \
+  --security-opt seccomp=unconfined \
   social-scheduler
+
+docker run -d --name scheduler -p 8501:8501 -v $(pwd)/data:/app/data --restart unless-stopped --shm-size=2g --security-opt seccomp=unconfined social-scheduler
 
 # Run (Windows PowerShell)
 docker run -d --name scheduler `
