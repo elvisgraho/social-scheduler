@@ -30,6 +30,7 @@ logger = init_logging("worker")
 WORKER_BUSY = False
 PAUSE_KEY = "queue_paused"
 FORCE_KEY = "queue_force_run"
+FORCE_PLATFORM_KEY = "queue_force_platform"
 TOKEN_CHECK_KEY = "last_token_check_date"
 TOKEN_CHECK_TIME = dtime(hour=8, minute=0)
 
@@ -164,9 +165,10 @@ def reset_stale_tasks():
         logger.error(f"Failed to reset stale tasks: {e}")
 
 
-def process_video(video: dict) -> None:
+def process_video(video: dict, forced_platforms: set[str] | None = None) -> None:
     queue_id = video["id"]
     file_path = video["file_path"]
+    forced_platforms = set(forced_platforms or [])
     
     paused = bool(int(get_config(PAUSE_KEY, 0) or 0))
     if paused:
@@ -212,6 +214,9 @@ def process_video(video: dict) -> None:
 
     # 4. Process Platforms
     for key, cfg in platform_items:
+        if forced_platforms and key not in forced_platforms:
+            continue
+
         label = cfg["label"]
         
         # SKIP if already succeeded in a previous attempt
@@ -296,6 +301,9 @@ def check_and_post():
 
     paused = bool(int(get_config(PAUSE_KEY, 0) or 0))
     force = bool(int(get_config(FORCE_KEY, 0) or 0))
+    force_platform = (get_config(FORCE_PLATFORM_KEY, "") or "").strip()
+    if force_platform and force_platform not in get_platforms():
+        force_platform = ""
     if paused and not force:
         logger.debug("Queue paused; skipping tick.")
         return
@@ -309,7 +317,8 @@ def check_and_post():
             due = pending[:1] if pending else []
         if force:
             set_config(FORCE_KEY, 0)
-        
+            set_config(FORCE_PLATFORM_KEY, "")
+
         if not due:
             logger.debug("No videos due at %s", now.isoformat())
             return
@@ -318,9 +327,10 @@ def check_and_post():
             # Check if status is still pending (in case of race conditions if multiple workers exist)
             if video.get('status') not in ('pending', 'retry'):
                 continue
-                
+
             logger.info("Processing queue item %s.", video["id"])
-            process_video(video)
+            platforms_to_run = {force_platform} if force_platform else None
+            process_video(video, platforms_to_run)
             
             # Add delay between different videos too
             time.sleep(random.uniform(5, 15))

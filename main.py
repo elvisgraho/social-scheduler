@@ -203,7 +203,7 @@ def render_queue_tab(queue_rows):
         st.session_state["force_now_confirmed"] = False
 
     # -- Controls --
-    pause_col, force_col = st.columns([2, 1])
+    pause_col, _ = st.columns([2, 1])
     
     # Pause Toggle
     pause_toggle = pause_col.toggle(
@@ -227,17 +227,46 @@ def render_queue_tab(queue_rows):
             st.session_state["queue_notice"] = {"level": "success", "text": message}
         st.rerun()
 
-    # Force Run Button
-    force_now = force_col.button(
+    # Force Run Buttons (next item + per-platform)
+    platforms = get_platforms()
+    action_cols = st.columns(len(platforms) + 2)
+
+    force_now = action_cols[0].button(
         "Upload next now",
         help="Process the next queued item immediately.",
         type="primary",
         disabled=not has_queue_items,
     )
+
+    forced_platform = None
+    forced_label = None
+    for idx, (p_key, p_cfg) in enumerate(platforms.items(), start=1):
+        label = p_cfg["label"]
+        btn = action_cols[idx].button(
+            f"Upload to {label}",
+            key=f"force_{p_key}",
+            help=f"Post the next queued item to {label} only.",
+            disabled=not has_queue_items,
+        )
+        if btn:
+            if not p_cfg["connected"]():
+                st.warning(f"{label} is not connected.")
+            else:
+                forced_platform = p_key
+                forced_label = label
+
+    delete_next = action_cols[-1].button(
+        "Delete Next In Queue",
+        help="Remove the next queued item and its file.",
+        type="secondary",
+        disabled=not bool(queue_rows),
+    )
+
     if force_now:
         if not has_queue_items:
             st.warning("No queued videos to upload.")
         elif st.session_state.get("force_now_confirmed"):
+            set_config("queue_force_platform", "")
             set_config("queue_force_run", 1)
             logger.info("Force upload requested via UI.")
             st.session_state["queue_notice"] = {"level": "success", "text": "Next item will be processed immediately."}
@@ -246,6 +275,37 @@ def render_queue_tab(queue_rows):
         else:
             st.warning("Click again to confirm immediate upload.")
             st.session_state["force_now_confirmed"] = True
+
+    if forced_platform:
+        if not has_queue_items:
+            st.warning("No queued videos to upload.")
+        else:
+            set_config("queue_force_platform", forced_platform)
+            set_config("queue_force_run", 1)
+            logger.info("Force upload requested for %s only.", forced_platform)
+            st.session_state["queue_notice"] = {
+                "level": "success",
+                "text": f"Next item will upload to {forced_label} only.",
+            }
+            st.session_state["force_now_confirmed"] = False
+            st.rerun()
+
+    if delete_next:
+        next_item = next(
+            (row for row in queue_rows if row.get("status") in ("pending", "retry", "failed")),
+            None,
+        )
+        if not next_item:
+            st.warning("No queued videos to delete.")
+        else:
+            delete_from_queue(next_item["id"])
+            fp = Path(next_item["file_path"])
+            if fp.exists():
+                fp.unlink(missing_ok=True)
+            logger.info("Deleted next queue item %s (%s).", next_item["id"], next_item["file_path"])
+            st.session_state["queue_notice"] = {"level": "success", "text": f"Removed #{next_item['id']} from queue."}
+            st.session_state["force_now_confirmed"] = False
+            st.rerun()
 
     # -- Uploader --
     uploaded_files = st.file_uploader(
