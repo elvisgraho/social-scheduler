@@ -5,6 +5,8 @@ from typing import Optional, Tuple
 import logging
 
 from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from src.database import get_config, set_account_state, set_config
 from src.logging_utils import init_logging
@@ -78,9 +80,43 @@ def youtube_connected() -> bool:
     return bool(get_youtube_credentials())
 
 
-def verify_youtube_credentials() -> tuple[bool, str]:
+def describe_youtube_http_error(err: HttpError) -> str:
+    """
+    Convert a YouTube HttpError into a user-friendly message with hints.
+    """
+    status = getattr(err, "resp", None)
+    status_code = getattr(status, "status", None)
+    raw = ""
+    try:
+        raw = err.content.decode() if isinstance(err.content, (bytes, bytearray)) else str(err.content)
+    except Exception:
+        raw = str(err)
+
+    message = getattr(err, "reason", "") or raw
+    try:
+        payload = json.loads(raw or "{}")
+        message = payload.get("error", {}).get("message", message)
+    except Exception:
+        pass
+
+    lower = (message or "").lower()
+    hint = ""
+    if "has not been used in project" in lower or "accessnotconfigured" in lower:
+        hint = "Enable YouTube Data API v3 for the selected Google Cloud project, then retry."
+    elif "quota" in lower:
+        hint = "Quota exceeded; wait for reset or request higher quota."
+    elif "forbidden" in lower and "permission" in lower:
+        hint = "Check that the OAuth client belongs to a project with YouTube Data API enabled."
+
+    base = f"API Error {status_code}: {message}" if status_code else f"API Error: {message}"
+    return f"{base} ({hint})" if hint else base
+
+
+def verify_youtube_credentials(probe_api: bool = False) -> tuple[bool, str]:
     """
     Attempt to refresh/validate the stored YouTube credentials.
+    If probe_api is True, performs a lightweight channels() call to confirm
+    YouTube Data API v3 is enabled for the OAuth project.
     """
     token_json = get_youtube_credentials()
     if not token_json:
@@ -96,9 +132,26 @@ def verify_youtube_credentials() -> tuple[bool, str]:
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
             set_config(YOUTUBE_KEY, creds.to_json())
+
+        if probe_api:
+            try:
+                service = build("youtube", "v3", credentials=creds, cache_discovery=False)
+                # Minimal call to confirm API is enabled and channel is accessible
+                service.channels().list(part="id", mine=True, maxResults=1).execute()
+            except HttpError as http_err:
+                msg = describe_youtube_http_error(http_err)
+                set_account_state("youtube", False, msg)
+                logger.warning("YouTube API probe failed: %s", msg)
+                return False, msg
+            except Exception as exc:
+                msg = f"API probe failed: {exc}"
+                set_account_state("youtube", False, msg)
+                logger.warning("YouTube credential verification failed: %s", msg)
+                return False, msg
+
         set_account_state("youtube", True, None)
-        logger.info("YouTube credentials verified/refreshed successfully.")
-        return True, "YouTube token is valid."
+        logger.info("YouTube credentials verified%s.", " with API probe" if probe_api else "")
+        return True, "YouTube token and API access look good."
     except Exception as exc:
         msg = f"Credential error: {exc}"
         set_account_state("youtube", False, msg)

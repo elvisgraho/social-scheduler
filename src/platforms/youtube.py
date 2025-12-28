@@ -7,7 +7,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from src.logging_utils import init_logging
-from src.auth_utils import get_youtube_credentials
+from src.auth_utils import get_youtube_credentials, describe_youtube_http_error
 from src.database import set_account_state, set_config
 
 YOUTUBE_KEY = "youtube_credentials"
@@ -63,13 +63,7 @@ def upload(video_path: str, title: str, description: str):
         return True, f"Uploaded ID: {video_id}"
 
     except HttpError as e:
-        # Fix: Parse API error content for clearer logs (e.g., 'quotaExceeded')
-        reason = e.reason
-        try:
-            reason = json.loads(e.content)['error']['message']
-        except Exception:
-            pass
-        err_msg = f"API Error {e.resp.status}: {reason}"
+        err_msg = describe_youtube_http_error(e)
         set_account_state("youtube", False, err_msg)
         return False, err_msg
 

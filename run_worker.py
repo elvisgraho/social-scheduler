@@ -21,6 +21,7 @@ from src.logging_utils import init_logging
 from src.notifier import send_telegram_message
 from src.platform_registry import get_platforms
 from src.auth_utils import verify_youtube_credentials
+from src.platforms import instagram as instagram_platform
 from src.platforms import tiktok as tiktok_platform
 from src.scheduling import get_schedule, next_slots
 
@@ -73,11 +74,17 @@ def _run_token_checks(now: datetime) -> None:
     """
     Validate platform tokens/sessions and warn on failure.
     """
-    ok, msg = verify_youtube_credentials()
+    ok, msg = verify_youtube_credentials(probe_api=True)
     if ok:
         logger.info("Daily YouTube token verification passed.")
     else:
         _notify(f"YouTube token check failed: {msg}")
+
+    ig_ok, ig_msg = instagram_platform.verify_login()
+    if ig_ok:
+        logger.info("Daily Instagram session verification passed.")
+    else:
+        _notify(f"Instagram session check failed: {ig_msg}")
 
     tt_ok, tt_msg = tiktok_platform.verify_session(force=True)
     if tt_ok:
@@ -101,6 +108,19 @@ def _maybe_verify_tokens(now: datetime) -> None:
         _run_token_checks(now)
     except Exception as exc:
         logger.warning("Skipping daily token check: %s", exc)
+
+
+def _preflight_platform(platform_key: str) -> tuple[bool, str]:
+    """
+    Quick readiness checks before attempting an upload so we fail fast with actionable errors.
+    """
+    if platform_key == "youtube":
+        return verify_youtube_credentials(probe_api=True)
+    if platform_key == "instagram":
+        return instagram_platform.verify_login()
+    if platform_key == "tiktok":
+        return tiktok_platform.verify_session(force=True)
+    return True, ""
 
 
 def process_video(video: dict) -> None:
@@ -163,6 +183,14 @@ def process_video(video: dict) -> None:
             reason = f"{label} not connected."
             current_logs[key] = reason
             missing_accounts.append(label)
+            continue
+
+        preflight_ok, preflight_msg = _preflight_platform(key)
+        if not preflight_ok:
+            failure = f"{label} failed: {preflight_msg}"
+            current_logs[key] = preflight_msg
+            failures.append(failure)
+            logger.error(failure)
             continue
 
         # Add Jitter (wait 10-30 seconds between platforms to avoid bot detection)

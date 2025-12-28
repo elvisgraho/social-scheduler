@@ -4,9 +4,11 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 from src.logging_utils import init_logging
 from src.database import (
     get_config,
@@ -205,10 +207,22 @@ def upload(video_path: str, description: str):
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument(f"user-agent={USER_AGENT}")
+    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
 
-    driver = webdriver.Chrome(options=options)
+    driver = None
 
     try:
+        try:
+            driver_path = os.environ.get("CHROMEDRIVER_PATH")
+            if not driver_path or not os.path.exists(driver_path):
+                driver_path = ChromeDriverManager().install()
+            driver = webdriver.Chrome(service=Service(driver_path), options=options)
+        except Exception as exc:
+            msg = f"ChromeDriver setup failed: {exc}"
+            set_account_state("tiktok", False, msg)
+            logger.error(msg)
+            return False, msg
+
         driver.get("https://www.tiktok.com")
         driver.add_cookie(
             {
@@ -274,4 +288,5 @@ def upload(video_path: str, description: str):
         logger.error("TikTok upload error: %s", exc)
         return False, str(exc)
     finally:
-        driver.quit()
+        if driver:
+            driver.quit()

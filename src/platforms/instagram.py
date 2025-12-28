@@ -115,7 +115,17 @@ def upload(video_path: str, caption: str):
         return False, msg
 
     try:
-        media = cl.clip_upload(video_path, caption=(caption or "")[:2200])
+        media = cl.clip_upload(
+            video_path,
+            caption=(caption or "")[:2200],
+            extra_data={"share_to_feed": 0},  # keep as Reel-only (no feed cross-post)
+        )
+        # Ensure the API returned a Reel (clips product type)
+        if getattr(media, "product_type", "").lower() != "clips":
+            err = "Upload completed but Instagram returned non-Reel media. Please update session/app version."
+            set_account_state("instagram", False, err)
+            return False, err
+
         _store_settings(cl)
         return True, f"Uploaded PK: {media.pk}"
 

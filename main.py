@@ -361,7 +361,7 @@ def render_accounts_tab():
                             logger.warning("YouTube link failed: %s", message)
 
     if st.button("Verify YouTube token"):
-        ok, msg = verify_youtube_credentials()
+        ok, msg = verify_youtube_credentials(probe_api=True)
         if ok:
             st.success(msg)
             logger.info("YouTube token verification succeeded.")
