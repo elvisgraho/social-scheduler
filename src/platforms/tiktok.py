@@ -134,50 +134,61 @@ def verify_session(force: bool = True) -> Tuple[bool, str]:
     return ok, message
 
 
-# --- ROBUST SELENIUM UTILS ---
+# --- SMART JS INTERACTION UTILS ---
 
-def _safe_click(driver, xpath, timeout=5):
+def _js_click_text(driver, text_signature):
     """
-    Tries to click an element. Handles overlaps by forcing JS click if standard click fails.
+    Scans ALL buttons and clickable divs for specific text and clicks via JS.
+    This bypasses complex nested HTML structures.
     """
     try:
-        element = WebDriverWait(driver, timeout).until(
-            EC.element_to_be_clickable((By.XPATH, xpath))
-        )
-        # Try polite click
-        element.click()
+        driver.execute_script(f"""
+            const keywords = ["{text_signature}"];
+            const elements = document.querySelectorAll('button, div[role="button"], div[class*="btn"]');
+            
+            for (let el of elements) {{
+                if (el.innerText.includes("{text_signature}") && el.offsetParent !== null) {{
+                    el.click();
+                    console.log("JS Clicked:", el);
+                    return;
+                }}
+            }}
+        """)
         return True
-    except ElementClickInterceptedException:
-        # Fallback to JS click (God Mode)
-        try:
-            element = driver.find_element(By.XPATH, xpath)
-            driver.execute_script("arguments[0].click();", element)
-            return True
-        except:
-            pass
     except Exception:
-        pass
-    return False
+        return False
 
-def _comply_with_popups(driver):
+def _dismiss_popups_aggressively(driver):
     """
-    Accepts/Turns On/Dismisses known dialogs positively to keep the app stable.
+    Attempts to click known 'Compliance' buttons using both XPath and JS.
     """
-    logger.debug("Checking for dialogs to accept...")
+    logger.debug("Scanning for popups to accept...")
     
-    # Priority List of "Positive" Buttons
+    # 1. XPath approach (Broad match using '.')
     targets = [
-        "//button[contains(text(), 'Turn on')]",   # Content checks
-        "//button[contains(text(), 'Allow all')]", # Cookies
-        "//button[contains(text(), 'Got it')]",    # Feature tour
-        "//button[contains(text(), 'Reload')]",    # Network error
-        "//div[contains(@class, 'modal')]//button[contains(text(), 'Upload')]" # "Upload another" confirmation
+        "//button[contains(., 'Turn on')]",   # Content checks
+        "//button[contains(., 'Allow all')]", # Cookies
+        "//button[contains(., 'Decline')]",   # Cookies Alt
+        "//button[contains(., 'Got it')]",    # Feature tour
+        "//button[contains(., 'Reload')]",    # Network error
+        "//div[contains(., 'Upload') and contains(@class, 'modal')]" # Confirmation
     ]
     
     for xpath in targets:
-        if _safe_click(driver, xpath, timeout=2):
-            logger.info(f"Accepted dialog: {xpath}")
-            time.sleep(2) # Give app time to process the acceptance
+        try:
+            # Find all matching
+            elements = driver.find_elements(By.XPATH, xpath)
+            for el in elements:
+                if el.is_displayed():
+                    driver.execute_script("arguments[0].click();", el)
+                    time.sleep(1)
+        except Exception:
+            pass
+
+    # 2. JS Text Search approach (Backup)
+    _js_click_text(driver, "Turn on")
+    _js_click_text(driver, "Allow all")
+    _js_click_text(driver, "Got it")
 
 def _debug_dump(driver, queue_name="error"):
     try:
@@ -242,8 +253,8 @@ def upload(video_path: str, description: str):
         # 4. Navigate to Upload
         driver.get("https://www.tiktok.com/upload?lang=en")
         
-        # 5. Handle Initial "Cookie" or "Feature" Popups
-        _comply_with_popups(driver)
+        # 5. Handle Initial Popups
+        _dismiss_popups_aggressively(driver)
 
         # 6. File Input
         # Wait for input to exist
@@ -254,16 +265,15 @@ def upload(video_path: str, description: str):
 
         # 7. Wait for Upload Verification
         logger.debug("Waiting for upload...")
-        # Wait longer (180s) because we expect TikTok to run checks
+        # Wait for success indicator
         WebDriverWait(driver, 180).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//div[contains(text(), 'Uploaded')] | //div[contains(@class, 'uploaded')] | //div[text()='100%']")
             )
         )
         
-        # 8. Handle Mid-Process "Content Check" Popup
-        # This usually appears right after the file finishes uploading
-        _comply_with_popups(driver)
+        # 8. Mid-Process Popups (Content Checks)
+        _dismiss_popups_aggressively(driver)
 
         # 9. Caption
         try:
@@ -273,46 +283,47 @@ def upload(video_path: str, description: str):
             )
             # Focus
             driver.execute_script("arguments[0].click();", caption_box)
-            time.sleep(1.5)
+            time.sleep(0.5)
             # Select All -> Backspace (Robust clearing)
             ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
-            time.sleep(1.5)
+            time.sleep(0.5)
             # Type text
             if description:
                 ActionChains(driver).send_keys(description).perform()
         except TimeoutException:
             logger.warning("Caption box not reachable, skipping.")
 
-        # 10. Scroll & Final Cleanup
+        # 10. Scroll
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        _comply_with_popups(driver)
 
-        # 11. Find Post Button
-        post_btn_xpath = "//button[div[text()='Post']] | //button[text()='Post']"
+        # 11. Find Post Button & Wait for Enablement
+        # Use simple text matching for robustness
+        post_btn_xpath = "//button[contains(., 'Post')]"
+        
         post_btn = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.XPATH, post_btn_xpath))
         )
         
-        # 12. Wait for Enablement (Copyright Check)
-        # Since we enabled checks, this might take 10-20 seconds
-        logger.debug("Waiting for copyright check (button enable)...")
-        for _ in range(60): # Wait up to 60s
+        logger.debug("Waiting for Post button enablement...")
+        # Loop for up to 60 seconds waiting for button to enable AND clearing popups
+        for _ in range(60):
+            # 1. Clear any blocking popups
+            _dismiss_popups_aggressively(driver)
+            
+            # 2. Check if button is enabled
             if post_btn.get_attribute("disabled") is None:
+                logger.info("Button enabled.")
                 break
             time.sleep(1)
-            # Occasionally check if a new popup blocked us
-            if _ % 5 == 0:
-                _comply_with_popups(driver)
 
-        # 13. Click Post
+        # 12. Click Post (JS Force)
         logger.info("Clicking Post...")
-        if not _safe_click(driver, post_btn_xpath):
-            raise Exception("Could not click Post button (overlapped or disabled).")
+        driver.execute_script("arguments[0].click();", post_btn)
 
-        # 14. Verify Success
+        # 13. Verify Success
         WebDriverWait(driver, 60).until(
             EC.presence_of_element_located(
-                (By.XPATH, "//div[contains(text(), 'Manage your posts')] | //div[contains(text(), 'Your video is being uploaded')] | //div[contains(text(), 'Upload another')]")
+                (By.XPATH, "//div[contains(., 'Manage your posts')] | //div[contains(., 'uploaded')] | //div[contains(., 'Upload another')]")
             )
         )
         
