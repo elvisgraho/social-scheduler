@@ -232,42 +232,45 @@ def render_queue_tab(queue_rows):
     platform_keys = list(platforms.keys())
     platform_labels = {k: cfg["label"] for k, cfg in platforms.items()}
 
-    action_cols = st.columns([2, 1])
-    force_now = action_cols[0].button(
+    controls = st.columns([1.3, 1, 1.6])
+    force_now = controls[0].button(
         "Upload next now",
         help="Process the next queued item immediately.",
         type="primary",
         disabled=not has_queue_items,
         key="force_next_btn",
+        use_container_width=True,
     )
-    delete_next = action_cols[1].button(
+    delete_next = controls[1].button(
         "Delete Next In Queue",
         help="Remove the next queued item and its file.",
         type="secondary",
         disabled=not bool(queue_rows),
         key="delete_next_btn",
+        use_container_width=True,
     )
 
-    # Single, stable selector avoids duplicate per-platform buttons after reruns.
-    platform_cols = st.columns([3, 1])
-    if platform_keys:
-        selected_platform = platform_cols[0].selectbox(
-            "Upload next only to",
-            options=platform_keys,
-            format_func=lambda k: platform_labels.get(k, k.title()),
-            key="force_platform_select",
-            help="Limit the next run to a single platform.",
+    # Single, stable selector avoids duplicate per-platform buttons and keeps layout aligned.
+    with controls[2]:
+        if platform_keys:
+            selected_platform = st.selectbox(
+                "Force next upload to",
+                options=platform_keys,
+                format_func=lambda k: platform_labels.get(k, k.title()),
+                key="force_platform_select",
+                help="Immediately push the next queued item to one platform only.",
+            )
+        else:
+            selected_platform = None
+            st.warning("No platforms available.")
+
+        force_platform_btn = st.button(
+            "Force upload to platform now",
+            key="force_platform_btn",
+            help="Trigger an immediate run of the next queued item to the selected platform only.",
+            disabled=not (has_queue_items and selected_platform),
+            use_container_width=True,
         )
-    else:
-        selected_platform = None
-        platform_cols[0].warning("No platforms available.")
-
-    force_platform_btn = platform_cols[1].button(
-        "Upload to platform",
-        key="force_platform_btn",
-        help="Post the next queued item only to the selected platform.",
-        disabled=not (has_queue_items and selected_platform),
-    )
 
     if force_now:
         if not has_queue_items:
@@ -294,7 +297,7 @@ def render_queue_tab(queue_rows):
             logger.info("Force upload requested for %s only.", selected_platform)
             st.session_state["queue_notice"] = {
                 "level": "success",
-                "text": f"Next item will upload to {platform_labels[selected_platform]} only.",
+                "text": f"Forcing the next queued item to {platform_labels[selected_platform]} now.",
             }
             st.session_state["force_now_confirmed"] = False
             st.rerun()
@@ -692,13 +695,46 @@ def render_logs_tab():
     st.subheader("System Logs")
     log_path = get_log_file_path()
     
-    col1, col2 = st.columns([3, 1])
-    lines = col1.slider("Lines", 50, 1000, 200, step=50)
+    col1, col2, col3, col4 = st.columns([1.2, 1, 1, 2])
+    view_choice = col1.selectbox(
+        "View window",
+        options=[("Last 200 lines", 200), ("Last 500 lines", 500), ("Last 1000 lines", 1000), ("Entire file", None)],
+        format_func=lambda opt: opt[0],
+        index=0,
+        key="log_view_window",
+        help="Choose how much of the log to display.",
+    )
     if col2.button("Refresh"):
         st.rerun()
+    if col3.button("Clear Log", help="Empty the current log file."):
+        if log_path.exists():
+            log_path.write_text("", encoding="utf-8")
+            st.success("Log file cleared.")
+            st.rerun()
+        else:
+            st.info("Log file not found.")
+    filter_text = col4.text_input(
+        "Filter (optional)",
+        value="",
+        placeholder="Search text, e.g. ERROR or TikTok",
+        key="log_filter_text",
+    )
         
-    log_text = tail_log(lines)
-    st.code(log_text, language="text")
+    # Load log content based on selection
+    if view_choice[1] is None and log_path.exists():
+        raw_log = log_path.read_text(encoding="utf-8", errors="ignore")
+    else:
+        raw_log = tail_log(view_choice[1] or 200)
+
+    # Apply simple filter if provided
+    if filter_text.strip():
+        filtered_lines = [line for line in raw_log.splitlines() if filter_text.lower() in line.lower()]
+        display_log = "\n".join(filtered_lines) if filtered_lines else "No log lines match that filter."
+    else:
+        display_log = raw_log
+
+    st.caption(f"Showing {view_choice[0]}")
+    st.code(display_log, language="text")
     
     if log_path.exists():
         st.download_button(
