@@ -45,15 +45,23 @@ def platform_status(platform_key: str) -> Dict:
     state = get_account_state(platform_key)
     config = PLATFORMS.get(platform_key, {})
     connected = config.get("connected", lambda: False)()
-    if connected and not state.get("connected"):
-        set_account_state(platform_key, True, None)
-        state = get_account_state(platform_key)
+
+    # Always refresh account_state to reflect current connection truth.
+    if connected:
+        if not state.get("connected") or state.get("last_error"):
+            set_account_state(platform_key, True, None)
+            state = get_account_state(platform_key)
+    else:
+        # Keep last_error if already recorded; otherwise mark as disconnected without a specific error.
+        if state.get("connected"):
+            set_account_state(platform_key, False, state.get("last_error"))
+            state = get_account_state(platform_key)
+
     return state
 
 
 def all_platform_statuses() -> Dict[str, Dict]:
-    statuses = get_all_account_states()
+    statuses = {}
     for key in PLATFORMS:
-        if key not in statuses:
-            statuses[key] = platform_status(key)
+        statuses[key] = platform_status(key)
     return statuses
