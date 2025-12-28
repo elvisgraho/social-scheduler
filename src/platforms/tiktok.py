@@ -23,7 +23,8 @@ from selenium.common.exceptions import (
     StaleElementReferenceException
 )
 
-# --- LOCAL IMPORTS MOCK ---
+# --- LOCAL IMPORTS ---
+# We use try/except to prevent import errors if running standalone for testing
 try:
     from src.logging_utils import init_logging
     from src.database import (
@@ -34,7 +35,6 @@ try:
         set_json_config,
     )
 except ImportError:
-    # Standalone fallback
     logging.basicConfig(level=logging.INFO)
     def init_logging(name): return logging.getLogger(name)
     def get_config(k, d=None): return d
@@ -48,7 +48,7 @@ SESSION_KEY = "tiktok_session_bundle"
 LEGACY_KEY = "tiktok_session_id"
 VERIFICATION_INTERVAL_HOURS = 6
 
-# Updated UA for 2025 - Linux Desktop
+# Updated UA for 2025 - Linux Desktop (Stealth)
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 logger = init_logging("tiktok")
@@ -116,7 +116,7 @@ return false;
 def _cleanup_zombies():
     """Kills orphaned chrome processes to free Pi RAM."""
     try:
-        # Only kill processes owned by the current user to avoid killing host processes if not in Docker
+        # Only kill processes to avoid killing host processes if not in Docker
         subprocess.run(["pkill", "-f", "chrome"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["pkill", "-f", "chromedriver"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
@@ -232,7 +232,11 @@ def get_driver():
 
 # --- UPLOAD LOGIC ---
 
-def upload_video(video_path: str, description: str):
+def upload(video_path: str, description: str):
+    """
+    Main entry point for TikTok upload.
+    Named 'upload' to match src/platform_registry.py requirements.
+    """
     is_valid, session_id, msg = ensure_session_valid()
     if not is_valid:
         return False, msg
@@ -369,4 +373,4 @@ def upload_video(video_path: str, description: str):
     finally:
         if driver:
             driver.quit()
-        _cleanup_zombies()
+        _cleanup_zombies() # Clean up immediately
