@@ -134,75 +134,50 @@ def verify_session(force: bool = True) -> Tuple[bool, str]:
     return ok, message
 
 
-# --- SAFE SELENIUM UTILS ---
+# --- ROBUST SELENIUM UTILS ---
 
-def _wait_for_spinner(driver):
-    """Waits for the loading spinner (dots) to disappear."""
+def _safe_click(driver, xpath, timeout=5):
+    """
+    Tries to click an element. Handles overlaps by forcing JS click if standard click fails.
+    """
     try:
-        # Generic loader detection
-        WebDriverWait(driver, 5).until(
-            EC.invisibility_of_element_located((By.XPATH, "//div[contains(@class, 'loader')] | //div[contains(@class, 'loading')]"))
+        element = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.XPATH, xpath))
         )
-    except Exception:
-        pass # If check fails, assume loaded or spinner not found
-
-def _safe_click(driver, xpath, timeout=10):
-    """
-    Tries to click an element. If StaleElementReference occurs, 
-    it re-finds the element and retries up to 3 times.
-    """
-    for attempt in range(3):
+        # Try polite click
+        element.click()
+        return True
+    except ElementClickInterceptedException:
+        # Fallback to JS click (God Mode)
         try:
-            element = WebDriverWait(driver, timeout).until(
-                EC.element_to_be_clickable((By.XPATH, xpath))
-            )
-            element.click()
+            element = driver.find_element(By.XPATH, xpath)
+            driver.execute_script("arguments[0].click();", element)
             return True
-        except StaleElementReferenceException:
-            logger.debug(f"Stale element on click {xpath}, retrying ({attempt+1})...")
-            time.sleep(1)
-        except ElementClickInterceptedException:
-            # Fallback to JS click if overlapped
-            try:
-                element = driver.find_element(By.XPATH, xpath)
-                driver.execute_script("arguments[0].click();", element)
-                return True
-            except:
-                pass
-            time.sleep(1)
-        except Exception:
-            return False
-    return False
-
-def _dismiss_popups_safely(driver):
-    """
-    Targeted removal of known obstructions without destroying app state.
-    """
-    logger.debug("Checking for blocking dialogs...")
-    
-    # 1. Try Clicking "Cancel" or "Decline" buttons first (Best Practice)
-    buttons = [
-        "//button[contains(text(), 'Decline optional cookies')]",
-        "//button[contains(text(), 'Allow all')]", # Sometimes easier to just allow to clear it
-        "//button[contains(text(), 'Cancel')]",
-        "//button[contains(text(), 'Got it')]"
-    ]
-    
-    for btn_xpath in buttons:
-        _safe_click(driver, btn_xpath, timeout=2)
-
-    # 2. Gentle DOM Cleanup (Only remove masks/overlays, not dialog containers)
-    try:
-        driver.execute_script("""
-            // Remove dark backdrops that capture clicks
-            document.querySelectorAll('div[class*="mask"], div[class*="overlay"]').forEach(el => el.remove());
-            
-            // Remove specific cookie banners if buttons failed
-            document.querySelectorAll('div[id*="cookie-banner"], div[class*="cookie-banner"]').forEach(el => el.remove());
-        """)
+        except:
+            pass
     except Exception:
         pass
+    return False
 
+def _comply_with_popups(driver):
+    """
+    Accepts/Turns On/Dismisses known dialogs positively to keep the app stable.
+    """
+    logger.debug("Checking for dialogs to accept...")
+    
+    # Priority List of "Positive" Buttons
+    targets = [
+        "//button[contains(text(), 'Turn on')]",   # Content checks
+        "//button[contains(text(), 'Allow all')]", # Cookies
+        "//button[contains(text(), 'Got it')]",    # Feature tour
+        "//button[contains(text(), 'Reload')]",    # Network error
+        "//div[contains(@class, 'modal')]//button[contains(text(), 'Upload')]" # "Upload another" confirmation
+    ]
+    
+    for xpath in targets:
+        if _safe_click(driver, xpath, timeout=2):
+            logger.info(f"Accepted dialog: {xpath}")
+            time.sleep(2) # Give app time to process the acceptance
 
 def _debug_dump(driver, queue_name="error"):
     try:
@@ -224,7 +199,7 @@ def upload(video_path: str, description: str):
 
     logger.info("Starting TikTok upload for %s...", os.path.basename(video_path))
 
-    # 1. Options
+    # 1. Options (Optimized for Pi Stability)
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -266,96 +241,75 @@ def upload(video_path: str, description: str):
         
         # 4. Navigate to Upload
         driver.get("https://www.tiktok.com/upload?lang=en")
-        _wait_for_spinner(driver)
-
-        # 5. Handle Initial Popups
-        _dismiss_popups_safely(driver)
-
-        # 6. Iframe Handling
-        try:
-            iframe = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//iframe[contains(@src, 'upload')]"))
-            )
-            driver.switch_to.frame(iframe)
-            logger.debug("Switched to upload iframe.")
-        except TimeoutException:
-            pass
-
-        # 7. File Input (Retry Logic)
-        time.sleep(2)
         
-        # Find input (retry loop to handle dynamic loading)
-        file_input = None
-        for _ in range(3):
-            try:
-                file_input = driver.find_element(By.XPATH, "//input[@type='file']")
-                break
-            except Exception:
-                time.sleep(1)
-        
-        if not file_input:
-            raise Exception("Could not find file input element.")
+        # 5. Handle Initial "Cookie" or "Feature" Popups
+        _comply_with_popups(driver)
 
+        # 6. File Input
+        # Wait for input to exist
+        file_input = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+        )
         file_input.send_keys(os.path.abspath(video_path))
 
-        # 8. Wait for Upload Verification
-        logger.debug("Waiting for upload verification...")
+        # 7. Wait for Upload Verification
+        logger.debug("Waiting for upload...")
+        # Wait longer (180s) because we expect TikTok to run checks
         WebDriverWait(driver, 180).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//div[contains(text(), 'Uploaded')] | //div[contains(@class, 'uploaded')] | //div[text()='100%']")
             )
         )
         
-        # 9. Handle Post-Upload Dialogs
-        _dismiss_popups_safely(driver)
+        # 8. Handle Mid-Process "Content Check" Popup
+        # This usually appears right after the file finishes uploading
+        _comply_with_popups(driver)
 
-        # 10. Caption
+        # 9. Caption
         try:
-            caption_box = driver.find_element(By.CSS_SELECTOR, ".public-DraftEditor-content")
-        except NoSuchElementException:
-            try:
-                caption_box = driver.find_element(By.XPATH, "//div[@contenteditable='true']")
-            except NoSuchElementException:
-                caption_box = None
-            
-        if caption_box and description:
-            try:
-                driver.execute_script("arguments[0].click();", caption_box)
-                time.sleep(0.5)
-                ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
-                time.sleep(0.5)
+            # Locate editor
+            caption_box = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, ".public-DraftEditor-content"))
+            )
+            # Focus
+            driver.execute_script("arguments[0].click();", caption_box)
+            time.sleep(1.5)
+            # Select All -> Backspace (Robust clearing)
+            ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
+            time.sleep(1.5)
+            # Type text
+            if description:
                 ActionChains(driver).send_keys(description).perform()
-            except Exception:
-                logger.warning("Caption entry failed, skipping.")
+        except TimeoutException:
+            logger.warning("Caption box not reachable, skipping.")
 
-        # 11. Final Scroll & Popup Check
+        # 10. Scroll & Final Cleanup
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        _dismiss_popups_safely(driver)
+        _comply_with_popups(driver)
 
-        # 12. Robust Post Click
-        # We define the xpath for the post button
+        # 11. Find Post Button
         post_btn_xpath = "//button[div[text()='Post']] | //button[text()='Post']"
+        post_btn = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, post_btn_xpath))
+        )
         
-        # Wait for it to be visible
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, post_btn_xpath)))
-        
-        # Wait for "Disabled" state to clear (Copyright checks)
-        logger.debug("Waiting for button enablement...")
-        for _ in range(40):
-            try:
-                btn = driver.find_element(By.XPATH, post_btn_xpath)
-                if btn.get_attribute("disabled") is None:
-                    break
-            except StaleElementReferenceException:
-                pass # Refetch on next loop
+        # 12. Wait for Enablement (Copyright Check)
+        # Since we enabled checks, this might take 10-20 seconds
+        logger.debug("Waiting for copyright check (button enable)...")
+        for _ in range(60): # Wait up to 60s
+            if post_btn.get_attribute("disabled") is None:
+                break
             time.sleep(1)
+            # Occasionally check if a new popup blocked us
+            if _ % 5 == 0:
+                _comply_with_popups(driver)
 
-        # Use safe click wrapper which handles StaleElement internally
+        # 13. Click Post
         logger.info("Clicking Post...")
         if not _safe_click(driver, post_btn_xpath):
-            raise Exception("Failed to click Post button after multiple attempts.")
+            raise Exception("Could not click Post button (overlapped or disabled).")
 
-        # 13. Verify Success
+        # 14. Verify Success
         WebDriverWait(driver, 60).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//div[contains(text(), 'Manage your posts')] | //div[contains(text(), 'Your video is being uploaded')] | //div[contains(text(), 'Upload another')]")
@@ -373,7 +327,7 @@ def upload(video_path: str, description: str):
         if "Stacktrace" in str(exc) or "crash" in str(exc).lower():
             err_msg = "Browser Crash (Memory/Driver). Check debug screenshot."
         elif "StaleElementReference" in str(exc):
-            err_msg = "UI updated unexpectedly (Stale Element). Retrying next cycle."
+            err_msg = "UI updated unexpectedly. Retrying next cycle."
             
         logger.error(f"TikTok Upload Failed: {exc}")
         set_account_state("tiktok", False, err_msg)
