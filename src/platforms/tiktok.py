@@ -1,8 +1,18 @@
 import os
+import time
 import requests
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
-from tiktok_uploader.upload import upload_video
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
+
 from src.logging_utils import init_logging
 from src.database import (
     get_config,
@@ -20,6 +30,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 logger = init_logging("tiktok")
 
+# --- Helper Functions ---
 def _utcnow() -> datetime:
     return datetime.utcnow()
 
@@ -82,7 +93,6 @@ def session_connected() -> bool:
     return bool(status["sessionid"]) and status["valid"]
 
 def _probe_session(session_id: str) -> Tuple[bool, str, Optional[str]]:
-    # Lightweight verification without launching a browser
     url = "https://www.tiktok.com/passport/web/account/info/?aid=1459"
     headers = {"User-Agent": USER_AGENT, "Cookie": f"sessionid={session_id};"}
     try:
@@ -116,34 +126,146 @@ def verify_session(force: bool = True) -> Tuple[bool, str]:
     ok, _, message = ensure_session_valid(force=force)
     return ok, message
 
+
+# --- ROBUST SELENIUM UPLOAD FUNCTION ---
+
 def upload(video_path: str, description: str):
-    # 1. Verify session using your existing logic
     ok, session_id, info = ensure_session_valid()
     if not ok or not session_id:
         return False, info
 
-    logger.info("Starting TikTok upload for %s via library...", os.path.basename(video_path))
+    logger.info("Starting TikTok upload for %s (ARM Native Mode)...", os.path.basename(video_path))
 
+    # 1. Setup Options for Headless Docker environment
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument(f"user-agent={USER_AGENT}")
+    
+    # 2. Point to the system-installed driver on the Pi
+    service = Service("/usr/bin/chromedriver")
+    
+    driver = None
     try:
-        # 3. Use the robust external library
-        # FIX: We pass 'sessionid' directly. The library handles the cookie creation.
-        # Passing 'cookies' as a list caused the "expected str/bytes/PathLike" error.
-        failed = upload_video(
-            filename=video_path,
-            description=description or "",
-            sessionid=session_id, 
-            headless=True
+        driver = webdriver.Chrome(service=service, options=options)
+        
+        # 3. CDP Magic to remove 'navigator.webdriver' flag (Anti-Detection)
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                })
+            """
+        })
+        
+        # 4. Set Domain Context & Cookies
+        driver.get("https://www.tiktok.com")
+        driver.add_cookie({
+            "name": "sessionid",
+            "value": session_id,
+            "domain": ".tiktok.com",
+            "path": "/",
+            "secure": True,
+            "httpOnly": True
+        })
+        
+        # 5. Refresh to apply cookie and navigate to Upload
+        driver.refresh()
+        time.sleep(1) # Brief pause to let cookies settle
+        driver.get("https://www.tiktok.com/upload?lang=en")
+
+        # 6. Iframe Handling (TikTok sometimes puts upload in an iframe)
+        try:
+            iframe = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//iframe[contains(@src, 'upload')]"))
+            )
+            driver.switch_to.frame(iframe)
+            logger.debug("Switched to upload iframe.")
+        except TimeoutException:
+            pass # Interface is likely main frame, proceed
+
+        # 7. File Input
+        # Find hidden input, no need to click it, just send keys
+        file_input = WebDriverWait(driver, 45).until(
+            EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+        )
+        file_input.send_keys(os.path.abspath(video_path))
+
+        # 8. Wait for Processing to Finish
+        # We wait for the "Uploaded" text or the "Change video" button which indicates success
+        WebDriverWait(driver, 120).until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//div[contains(text(), 'Uploaded')] | //div[contains(@class, 'uploaded')] | //div[text()='100%']")
+            )
         )
 
-        if not failed:
-            set_account_state("tiktok", True, None)
-            return True, "Upload Successful"
-        else:
-            set_account_state("tiktok", False, "Library reported failure")
-            return False, "Upload failed"
+        # 9. Handle Caption
+        try:
+            # Try specific editor class first, fall back to generic contenteditable
+            caption_input = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'public-DraftEditor-content')] | //div[@contenteditable='true']"))
+            )
+            # Clear existing text (like filename) logic
+            caption_input.send_keys(Keys.CONTROL + "a")
+            caption_input.send_keys(Keys.DELETE)
+            # Type new description
+            caption_input.send_keys(description or "")
+        except TimeoutException:
+            logger.warning("Could not find caption input, skipping description.")
+
+        # 10. Click Post (Robust Method)
+        # Scroll to bottom to ensure button is in viewport
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        
+        # Aggressively remove overlays that might intercept the click
+        driver.execute_script("""
+            const overlays = document.querySelectorAll('[class*="modal"], [class*="banner"], [class*="overlay"]');
+            overlays.forEach(el => el.remove());
+        """)
+
+        # Wait for button to be clickable AND not disabled (processing check)
+        post_btn = WebDriverWait(driver, 45).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[div[text()='Post']] | //button[text()='Post']"))
+        )
+        
+        # Verification check: Ensure button isn't disabled (TikTok disables it during copyright check)
+        # We loop briefly to wait for 'disabled' attribute to disappear
+        for _ in range(10):
+            if post_btn.get_attribute("disabled") is None:
+                break
+            time.sleep(1)
+
+        try:
+            post_btn.click()
+        except ElementClickInterceptedException:
+            # Fallback: JavaScript Click if blocked
+            logger.warning("Post click intercepted, trying JS click.")
+            driver.execute_script("arguments[0].click();", post_btn)
+
+        # 11. Final Success Verification
+        # Wait for redirect to profile or "Manage your posts" modal
+        WebDriverWait(driver, 60).until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//div[contains(text(), 'Manage your posts')] | //div[contains(text(), 'Your video is being uploaded')] | //div[contains(text(), 'Upload another')]")
+            )
+        )
+        
+        set_account_state("tiktok", True, None)
+        return True, "Upload Successful"
 
     except Exception as exc:
-        err_str = str(exc)
-        logger.error("TikTok upload error: %s", err_str)
-        set_account_state("tiktok", False, err_str)
-        return False, err_str
+        # Capture short error for DB
+        err_msg = str(exc).split("\n")[0]
+        # Log full trace for debugging
+        logger.error("TikTok upload error details: %s", exc)
+        set_account_state("tiktok", False, err_msg)
+        return False, err_msg
+    finally:
+        if driver:
+            driver.quit()

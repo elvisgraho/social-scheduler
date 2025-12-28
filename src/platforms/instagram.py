@@ -1,5 +1,7 @@
 import json
+import time
 from typing import Tuple, Dict, Any
+
 from instagrapi import Client
 from instagrapi.exceptions import (
     ChallengeRequired, 
@@ -7,6 +9,9 @@ from instagrapi.exceptions import (
     TwoFactorRequired, 
     ClientError
 )
+# CRITICAL FIX: Import ValidationError to catch the specific library bug
+from pydantic import ValidationError
+
 from src.logging_utils import init_logging
 from src.database import get_config, set_account_state, set_config, set_json_config
 
@@ -146,6 +151,34 @@ def upload(video_path: str, caption: str):
 
         _store_settings(cl)
         return True, f"Uploaded PK: {media.pk}"
+
+    # CRITICAL FIX: Catch the library bug ("audio_filter_infos" validation error)
+    except ValidationError:
+        logger.warning("Instagram library crashed on response parsing (Pydantic). Verifying upload existence...")
+        try:
+            # Wait for Instagram backend
+            time.sleep(10)
+            
+            # Check the user's latest posts to see if it actually worked
+            my_id = cl.user_id
+            medias = cl.user_medias(my_id, amount=2)
+            
+            for m in medias:
+                # Check if it's a Reel (media_type 2) and verify caption start match
+                # Use a small slice of caption to avoid encoding mismatches
+                if m.media_type == 2 and (caption[:15] in (m.caption_text or "")):
+                    _store_settings(cl)
+                    msg = f"Uploaded PK: {m.pk} (Verified after library validation error)"
+                    set_account_state("instagram", True, None)
+                    return True, msg
+            
+            # If loop finishes without finding it
+            raise Exception("Upload failed: Library error and video not found on profile.")
+            
+        except Exception as check_exc:
+            final_err = f"Validation Error & Verification Failed: {check_exc}"
+            set_account_state("instagram", False, final_err)
+            return False, final_err
 
     except Exception as exc:
         # If the first attempt fails, we check if we should retry.
