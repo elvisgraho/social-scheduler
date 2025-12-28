@@ -11,6 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       chromium chromium-driver \
+      ffmpeg \ 
       wget curl ca-certificates \
       libnss3 libgdk-pixbuf-2.0-0 libxss1 libgtk-3-0 libasound2 \
       fonts-liberation && \
