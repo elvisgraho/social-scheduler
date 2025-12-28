@@ -115,8 +115,9 @@ def describe_youtube_http_error(err: HttpError) -> str:
 def verify_youtube_credentials(probe_api: bool = False) -> tuple[bool, str]:
     """
     Attempt to refresh/validate the stored YouTube credentials.
-    If probe_api is True, performs a lightweight channels() call to confirm
-    YouTube Data API v3 is enabled for the OAuth project.
+    If probe_api is True, performs a lightweight public call to confirm
+    YouTube Data API v3 is enabled for the OAuth project without requiring
+    broader scopes than youtube.upload.
     """
     token_json = get_youtube_credentials()
     if not token_json:
@@ -136,8 +137,8 @@ def verify_youtube_credentials(probe_api: bool = False) -> tuple[bool, str]:
         if probe_api:
             try:
                 service = build("youtube", "v3", credentials=creds, cache_discovery=False)
-                # Minimal call to confirm API is enabled and channel is accessible
-                service.channels().list(part="id", mine=True, maxResults=1).execute()
+                # Public endpoint; should succeed with youtube.upload scope if the API is enabled.
+                service.i18nLanguages().list(part="snippet", hl="en").execute()
             except HttpError as http_err:
                 msg = describe_youtube_http_error(http_err)
                 set_account_state("youtube", False, msg)
