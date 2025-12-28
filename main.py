@@ -204,11 +204,12 @@ def render_queue_tab(queue_rows, uploaded_rows):
     if not has_queue_items:
         st.session_state["force_now_confirmed"] = False
 
-    # -- Controls --
-    pause_col, _ = st.columns([2, 1])
-    
+    # --- Worker Controls ---
+    st.markdown("#### Worker controls")
+    worker_cols = st.columns([1, 1, 1])
+
     # Pause Toggle
-    pause_toggle = pause_col.toggle(
+    pause_toggle = worker_cols[0].toggle(
         "Pause uploads",
         value=paused,
         help="When on, the worker will not post until you turn it off.",
@@ -229,22 +230,22 @@ def render_queue_tab(queue_rows, uploaded_rows):
             st.session_state["queue_notice"] = {"level": "success", "text": message}
         st.rerun()
 
-    # Force Run Buttons (next item + per-platform)
-    platforms = get_platforms()
-    platform_keys = list(platforms.keys())
-    platform_labels = {k: cfg["label"] for k, cfg in platforms.items()}
+    # Shuffle queue
+    if worker_cols[1].button(
+        "Shuffle queue order",
+        help="Randomize scheduled dates for pending/retry items starting from the next available slot."
+    ):
+        shuffled, first_slot = ui_logic.shuffle_queue(queue_rows)
+        if shuffled:
+            formatted = ui_logic.format_datetime_for_ui(first_slot.isoformat()) if first_slot else "next slot"
+            st.session_state["queue_notice"] = {"level": "success", "text": f"Shuffled {shuffled} items. Next slot: {formatted}."}
+        else:
+            st.session_state["queue_notice"] = {"level": "info", "text": "No pending items to shuffle."}
+        st.rerun()
 
-    controls = st.columns([1.3, 1, 1.6])
-    force_now = controls[0].button(
-        "Upload next now",
-        help="Process the next queued item immediately.",
-        type="primary",
-        disabled=not has_queue_items,
-        key="force_next_btn",
-        use_container_width=True,
-    )
-    delete_next = controls[1].button(
-        "Delete Next In Queue",
+    # Delete-next as a quick cleanup action
+    delete_next = worker_cols[2].button(
+        "Delete next in queue",
         help="Remove the next queued item and its file.",
         type="secondary",
         disabled=not bool(queue_rows),
@@ -252,11 +253,45 @@ def render_queue_tab(queue_rows, uploaded_rows):
         use_container_width=True,
     )
 
-    # Single, stable selector avoids duplicate per-platform buttons and keeps layout aligned.
-    with controls[2]:
+    if delete_next:
+        next_item = next(
+            (row for row in queue_rows if row.get("status") in ("pending", "retry", "failed")),
+            None,
+        )
+        if not next_item:
+            st.warning("No queued videos to delete.")
+        else:
+            delete_from_queue(next_item["id"])
+            fp = Path(next_item["file_path"])
+            if fp.exists():
+                fp.unlink(missing_ok=True)
+            logger.info("Deleted next queue item %s (%s).", next_item["id"], next_item["file_path"])
+            st.session_state["queue_notice"] = {"level": "success", "text": f"Removed #{next_item['id']} from queue."}
+            st.session_state["force_now_confirmed"] = False
+            st.rerun()
+
+    # --- Immediate actions ---
+    st.markdown("#### Immediate actions")
+    action_col1, action_col2 = st.columns([1.2, 1])
+
+    force_now = action_col1.button(
+        "Upload next now",
+        help="Process the next queued item immediately.",
+        type="primary",
+        disabled=not has_queue_items,
+        key="force_next_btn",
+        use_container_width=True,
+    )
+
+    # Force-to-platform is separated for clarity
+    platforms = get_platforms()
+    platform_keys = list(platforms.keys())
+    platform_labels = {k: cfg["label"] for k, cfg in platforms.items()}
+
+    with action_col2:
         if platform_keys:
             selected_platform = st.selectbox(
-                "Force next upload to",
+                "Force to platform",
                 options=platform_keys,
                 format_func=lambda k: platform_labels.get(k, k.title()),
                 key="force_platform_select",
@@ -267,7 +302,7 @@ def render_queue_tab(queue_rows, uploaded_rows):
             st.warning("No platforms available.")
 
         force_platform_btn = st.button(
-            "Force upload to platform now",
+            "Send next to platform",
             key="force_platform_btn",
             help="Trigger an immediate run of the next queued item to the selected platform only.",
             disabled=not (has_queue_items and selected_platform),
@@ -304,44 +339,12 @@ def render_queue_tab(queue_rows, uploaded_rows):
             st.session_state["force_now_confirmed"] = False
             st.rerun()
 
-    if delete_next:
-        next_item = next(
-            (row for row in queue_rows if row.get("status") in ("pending", "retry", "failed")),
-            None,
-        )
-        if not next_item:
-            st.warning("No queued videos to delete.")
-        else:
-            delete_from_queue(next_item["id"])
-            fp = Path(next_item["file_path"])
-            if fp.exists():
-                fp.unlink(missing_ok=True)
-            logger.info("Deleted next queue item %s (%s).", next_item["id"], next_item["file_path"])
-            st.session_state["queue_notice"] = {"level": "success", "text": f"Removed #{next_item['id']} from queue."}
-            st.session_state["force_now_confirmed"] = False
-            st.rerun()
-
-    # -- Uploader --
+    # --- Add videos ---
+    st.markdown("#### Add videos to schedule")
     uploaded_files = st.file_uploader(
         "Drop multiple shorts (mp4/mov)", type=["mp4", "mov", "m4v"], accept_multiple_files=True
     )
     st.caption("Tip: Upload 7-10 at once with one shared title/description.")
-    
-    col_shuf1, col_shuf2 = st.columns(2)
-    shuffle_order = col_shuf1.checkbox(
-        "Shuffle video order", 
-        value=True, 
-        help="Randomize which video is scheduled for which day."
-    )
-    
-    current_platform_shuffle = bool(int(get_config("platform_shuffle", 1) or 0))
-    per_platform_shuffle = col_shuf2.checkbox(
-        "Randomize platform post order",
-        value=current_platform_shuffle,
-        help="Add random delays between platforms to behave more human-like."
-    )
-    if int(per_platform_shuffle) != int(current_platform_shuffle):
-        set_config("platform_shuffle", int(per_platform_shuffle))
 
     def _uploads_signature(files) -> tuple:
         return tuple((f.name, getattr(f, "size", None)) for f in files)
@@ -367,7 +370,7 @@ def render_queue_tab(queue_rows, uploaded_rows):
             # If signature changed, process new files
             if st.session_state.get("queued_sig") != sig:
                 logger.info("Queuing %s new videos.", len(uploaded_files))
-                count = ui_logic.save_files_to_queue(uploaded_files, slots, UPLOAD_DIR, shuffle_order)
+                count = ui_logic.save_files_to_queue(uploaded_files, slots, UPLOAD_DIR, shuffle_order=False)
                 
                 if count > 0:
                     st.session_state["queued_sig"] = sig

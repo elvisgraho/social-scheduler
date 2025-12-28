@@ -65,10 +65,7 @@ def warn_tiktok_session_if_needed() -> None:
 
 
 def _platform_shuffle_enabled() -> bool:
-    try:
-        return bool(int(get_config("platform_shuffle", 1) or 0))
-    except Exception:
-        return True
+    return True
 
 
 def _run_token_checks(now: datetime) -> None:
