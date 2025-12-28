@@ -35,12 +35,11 @@ SESSION_KEY = "tiktok_session_bundle"
 LEGACY_KEY = "tiktok_session_id"
 VERIFICATION_INTERVAL_HOURS = 6
 REFRESH_WARNING_DAYS = 25
-# Use a very standard, real desktop User Agent to avoid fingerprinting
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 logger = init_logging("tiktok")
 
-# --- HELPER FUNCTIONS (Preserved) ---
+# --- HELPER FUNCTIONS ---
 def _utcnow() -> datetime:
     return datetime.utcnow()
 
@@ -139,19 +138,20 @@ def verify_session(force: bool = True) -> Tuple[bool, str]:
 
 # --- ROBUST UPLOAD IMPLEMENTATION ---
 
-def _nuke_overlays(driver):
-    """Aggressively removes modal backdrops, banners, and overlays via JS."""
+def _handle_cookie_banner(driver):
+    """
+    Specifically targets the 'Decline optional cookies' button seen in the screenshot.
+    """
     try:
-        driver.execute_script("""
-            const selectors = [
-                'div[class*="modal"]', 'div[class*="mask"]', 'div[class*="overlay"]',
-                'div[class*="banner"]', 'div[id*="cookie"]'
-            ];
-            selectors.forEach(sel => {
-                document.querySelectorAll(sel).forEach(el => el.remove());
-            });
-        """)
+        # Look for the specific decline button (exact text match based on screenshot)
+        decline_btn = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Decline optional cookies')] | //button[contains(text(), 'Allow all')]"))
+        )
+        decline_btn.click()
+        logger.debug("Cookie banner dismissed.")
+        time.sleep(1) # Wait for animation
     except Exception:
+        # Banner might not be there or already handled
         pass
 
 def _debug_dump(driver, queue_name="error"):
@@ -162,13 +162,9 @@ def _debug_dump(driver, queue_name="error"):
         os.makedirs(debug_dir, exist_ok=True)
         
         screen_path = os.path.join(debug_dir, f"tiktok_{queue_name}_{ts}.png")
-        html_path = os.path.join(debug_dir, f"tiktok_{queue_name}_{ts}.html")
         
         driver.save_screenshot(screen_path)
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-            
-        logger.error(f"Debug saved: {screen_path}")
+        logger.error(f"Debug screenshot saved: {screen_path}")
     except Exception as e:
         logger.error(f"Failed to save debug info: {e}")
 
@@ -179,13 +175,17 @@ def upload(video_path: str, description: str):
 
     logger.info("Starting TikTok upload for %s...", os.path.basename(video_path))
 
-    # 1. Chromium Options for Headless / Anti-Detect
+    # 1. Chromium Options for Stability on Pi/ARM
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage") # Critical for Docker
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-infobars")
+    # New flags to prevent 'Stacktrace' crashes on ARM
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-extensions")
+    
     options.add_argument("--window-size=1920,1080")
     options.add_argument(f"user-agent={USER_AGENT}")
     
@@ -194,26 +194,22 @@ def upload(video_path: str, description: str):
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    # Use System Driver (ARM/Pi compatible)
     service = Service("/usr/bin/chromedriver")
     
     driver = None
     try:
         driver = webdriver.Chrome(service=service, options=options)
         
-        # 2. Advanced CDP Stealth (Mask webdriver & plugins)
+        # 2. Advanced CDP Stealth
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
             """
         })
 
         # 3. Authenticate
-        logger.debug("Navigating to TikTok...")
         driver.get("https://www.tiktok.com")
-        
         driver.add_cookie({
             "name": "sessionid",
             "value": session_id,
@@ -223,30 +219,32 @@ def upload(video_path: str, description: str):
             "httpOnly": True
         })
         
-        # 4. Navigate to Upload
         driver.refresh()
         time.sleep(2)
         driver.get("https://www.tiktok.com/upload?lang=en")
 
-        # 5. Iframe / Context Detection
-        # TikTok sometimes wraps the upload tool in an iframe.
-        wait = WebDriverWait(driver, 20)
+        # 4. Handle Overlays (Cookie Banner) - CRITICAL FIX
+        _handle_cookie_banner(driver)
+
+        # 5. Iframe Detection
+        wait = WebDriverWait(driver, 10)
         try:
             iframe = wait.until(EC.presence_of_element_located((By.XPATH, "//iframe[contains(@src, 'upload')]")))
             driver.switch_to.frame(iframe)
             logger.debug("Switched to upload iframe.")
         except TimeoutException:
-            logger.debug("No upload iframe found, assuming main frame.")
+            pass
 
         # 6. File Input
-        logger.debug("Locating file input...")
+        # Add delay to ensure render process is stable before heavy file op
+        time.sleep(2)
+        
         file_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
         file_input.send_keys(os.path.abspath(video_path))
 
-        # 7. Wait for Upload Verification
-        # Critical: Wait until the "Uploading" percent indicator DISAPPEARS or "Uploaded" text APPEARS.
+        # 7. Wait for Upload Success
+        # Wait for "Uploaded" text or progress bar completion
         logger.debug("Waiting for video processing...")
-        # Check for success indicators
         WebDriverWait(driver, 180).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//div[contains(text(), 'Uploaded')] | //div[contains(@class, 'uploaded')] | //div[text()='100%']")
@@ -254,54 +252,43 @@ def upload(video_path: str, description: str):
         )
         
         # 8. Caption Input
-        # TikTok uses a DraftEditor, usually div[contenteditable="true"]
         try:
             caption_box = driver.find_element(By.CSS_SELECTOR, ".public-DraftEditor-content")
         except NoSuchElementException:
-            caption_box = driver.find_element(By.XPATH, "//div[@contenteditable='true']")
+            try:
+                caption_box = driver.find_element(By.XPATH, "//div[@contenteditable='true']")
+            except NoSuchElementException:
+                caption_box = None
             
         if caption_box and description:
-            # Click to focus
             driver.execute_script("arguments[0].click();", caption_box)
             time.sleep(0.5)
-            # Use JS to clear and set text to avoid modifier key issues in headless
-            # Note: TikTok DraftEditor is complex, sending keys is safer than innerHTML replacement
             ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
             time.sleep(0.5)
+            # Filter emoji or complex chars if they cause issues, but usually fine
             ActionChains(driver).send_keys(description).perform()
 
         # 9. Handle "Post" Button
-        # Scroll down
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        _nuke_overlays(driver) # Remove 'Get App' banners
-
-        # Find the button
+        
+        # Ensure button is active
         post_btn = wait.until(EC.presence_of_element_located(
             (By.XPATH, "//button[div[text()='Post']] | //button[text()='Post']")
         ))
         
-        # 10. Wait for "Copyright Check" / Processing
-        # The button is disabled while TikTok checks the video.
-        logger.debug("Waiting for Post button to enable...")
+        # 10. Wait for Copyright Check (Disabled state)
         for i in range(30):
-            # Check for disabled attribute or class
-            classes = post_btn.get_attribute("class") or ""
-            disabled_attr = post_btn.get_attribute("disabled")
-            
-            if disabled_attr is None and "disabled" not in classes:
+            if post_btn.get_attribute("disabled") is None:
                 break
             time.sleep(1)
             
-        # 11. Click
-        logger.info("Clicking Post...")
+        # 11. Click Post
         try:
             post_btn.click()
         except ElementClickInterceptedException:
-            # Fallback for overlays
             driver.execute_script("arguments[0].click();", post_btn)
 
-        # 12. Confirm Success
-        # Wait for redirect to profile or "Manage your posts" modal
+        # 12. Final Verification
         WebDriverWait(driver, 60).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//div[contains(text(), 'Manage your posts')] | //div[contains(text(), 'Your video is being uploaded')] | //div[contains(text(), 'Upload another')]")
@@ -312,18 +299,15 @@ def upload(video_path: str, description: str):
         return True, "Upload Successful"
 
     except Exception as exc:
-        # Debugging for headless failures
         if driver:
             _debug_dump(driver, "upload_failure")
             
-        err_msg = str(exc)
-        # Simplify error for DB
-        if "Timeout" in err_msg:
-            err_msg = "Timeout waiting for TikTok elements (Check screenshot in logs)"
-        elif "NoSuchElement" in err_msg:
-            err_msg = "Could not find upload elements (Check screenshot in logs)"
+        err_msg = str(exc).split("\n")[0]
+        # Add hint for the specific crash seen in logs
+        if "Stacktrace" in str(exc) and "#0" in str(exc):
+            err_msg = "Browser Crash (Memory/Driver). Check debug screenshot."
             
-        logger.error(f"TikTok Upload Failed: {err_msg}")
+        logger.error(f"TikTok Upload Failed: {exc}")
         set_account_state("tiktok", False, err_msg)
         return False, err_msg
         
