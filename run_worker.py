@@ -13,7 +13,6 @@ from src.database import (
     increment_attempts,
     init_db,
     set_json_config,
-    reschedule_queue_item,
     set_config,
     update_queue_status,
 )
@@ -23,11 +22,10 @@ from src.platform_registry import get_platforms
 from src.auth_utils import verify_youtube_credentials
 from src.platforms import instagram as instagram_platform
 from src.platforms import tiktok as tiktok_platform
-from src.scheduling import get_schedule, next_slots
+from src.scheduling import get_schedule
 
 logger = init_logging("worker")
 from src.logging_utils import log_once
-MAX_ATTEMPTS = 3
 WORKER_BUSY = False
 PAUSE_KEY = "queue_paused"
 FORCE_KEY = "queue_force_run"
@@ -77,18 +75,21 @@ def _run_token_checks(now: datetime) -> None:
     ok, msg = verify_youtube_credentials(probe_api=True)
     if ok:
         logger.info("Daily YouTube token verification passed.")
+        set_config("last_youtube_ok", now.isoformat())
     else:
         _notify(f"YouTube token check failed: {msg}")
 
     ig_ok, ig_msg = instagram_platform.verify_login()
     if ig_ok:
         logger.info("Daily Instagram session verification passed.")
+        set_config("last_instagram_ok", now.isoformat())
     else:
         _notify(f"Instagram session check failed: {ig_msg}")
 
     tt_ok, tt_msg = tiktok_platform.verify_session(force=True)
     if tt_ok:
         logger.info("Daily TikTok session verification passed.")
+        set_config("last_tiktok_ok", now.isoformat())
     else:
         _notify(f"TikTok session check failed: {tt_msg}")
 
@@ -216,10 +217,7 @@ def process_video(video: dict) -> None:
             logger.error(failure)
 
     # 5. Determine Final Status
-    # If there are failures, we retry. BUT we must ensure we don't retry forever.
     if failures or missing_accounts:
-        status = "retry" if attempts < MAX_ATTEMPTS else "failed"
-
         # Consolidate error messages
         parts = []
         if failures:
@@ -228,31 +226,17 @@ def process_video(video: dict) -> None:
             parts.append(f"Awaiting account connections: {', '.join(missing_accounts)}")
         error_msg = "; ".join(parts) if parts else "Awaiting account connections."
 
-        update_queue_status(queue_id, status, error_msg, current_logs)
+        update_queue_status(queue_id, "failed", error_msg, current_logs)
         set_config(PAUSE_KEY, 1)
 
-        retry_time = None
-        if status == "retry":
-            future_slots = next_slots(1, start=_now_with_timezone())
-            if future_slots:
-                retry_time = future_slots[0]
+        logger.error("Upload halted for queue #%s: %s", queue_id, error_msg)
+        try:
+            import json as _json
+            logger.error("failure_detail=%s", _json.dumps({"queue_id": queue_id, "failures": failures, "missing": missing_accounts}))
+        except Exception:
+            pass
 
-            # Enforce minimum backoff of 60 mins for retries to allow API limits to reset
-            min_backoff = _now_with_timezone() + timedelta(minutes=60)
-            if not retry_time or retry_time < min_backoff:
-                retry_time = min_backoff
-
-            reschedule_queue_item(queue_id, retry_time.isoformat())
-            logger.info(
-                "Rescheduled queue #%s (Attempt %s/%s) for %s due to failures.",
-                queue_id,
-                attempts,
-                MAX_ATTEMPTS,
-                retry_time.isoformat(),
-            )
-
-        if failures or missing_accounts:
-            _notify(f"Queue #{queue_id} paused: {error_msg}")
+        _notify(f"Queue #{queue_id} paused: {error_msg}")
         return
 
     # Success

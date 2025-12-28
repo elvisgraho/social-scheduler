@@ -321,3 +321,39 @@ def get_all_account_states() -> Dict[str, Dict[str, Any]]:
     rows = conn.execute("SELECT * FROM account_state").fetchall()
     conn.close()
     return {row["platform"]: dict(row) for row in rows}
+
+
+# --- Backup & Restore ---
+
+def get_all_settings() -> Dict[str, Any]:
+    conn = get_conn()
+    rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    conn.close()
+    return {row["key"]: row["value"] for row in rows}
+
+
+def export_config() -> Dict[str, Any]:
+    """
+    Export settings and account_state for backup/migration.
+    """
+    return {
+        "settings": get_all_settings(),
+        "account_state": get_all_account_states(),
+    }
+
+
+def import_config(payload: Dict[str, Any]) -> Tuple[int, int]:
+    """
+    Restore settings/account_state from a backup payload.
+    Returns (settings_count, account_state_count).
+    """
+    settings = payload.get("settings") or {}
+    accounts = payload.get("account_state") or {}
+
+    for key, value in settings.items():
+        set_config(key, value)
+
+    for platform, state in accounts.items():
+        set_account_state(platform, bool(state.get("connected")), state.get("last_error"))
+
+    return len(settings), len(accounts)

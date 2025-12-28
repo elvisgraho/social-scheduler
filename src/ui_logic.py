@@ -11,7 +11,7 @@ import pytz
 
 # Imports from your existing modules
 from src.database import add_to_queue, get_config, reschedule_queue_item
-from src.scheduling import get_schedule, next_slots
+from src.scheduling import get_schedule, next_daily_slots
 
 logger = logging.getLogger("ui_logic")
 
@@ -53,6 +53,25 @@ def get_schedule_start_time(queue_rows: List[Dict[str, Any]]) -> datetime:
     latest_scheduled = max(scheduled_times)
     # If the latest scheduled item is in the past, start from now
     return max(latest_scheduled, now)
+
+
+def occupied_schedule_dates(queue_rows: List[Dict[str, Any]]) -> set:
+    """
+    Return set of YYYY-MM-DD strings already scheduled for pending/retry/processing items.
+    """
+    dates = set()
+    for row in queue_rows:
+        if row.get("status") not in ("pending", "retry", "processing"):
+            continue
+        dt = parse_iso(row.get("scheduled_for"))
+        if not dt:
+            continue
+        if dt.tzinfo:
+            dt = dt.date()
+        else:
+            dt = dt.date()
+        dates.add(dt.isoformat())
+    return dates
 
 def format_queue_dataframe(queue_rows: List[Dict[str, Any]]) -> pd.DataFrame:
     """Converts raw DB rows into a clean Pandas DataFrame for the UI."""
@@ -234,7 +253,8 @@ def reschedule_pending_items(
     else:
         anchor = anchor.astimezone(tz)
 
-    slots = next_slots(len(pending_items), start=anchor)
+    occupied = occupied_schedule_dates(queue_rows)
+    slots = next_daily_slots(len(pending_items), start=anchor, occupied_dates=occupied)
     if not slots:
         return 0, None
 
@@ -249,6 +269,7 @@ def reschedule_pending_items(
     for row, slot in zip(pending_sorted, slots):
         reschedule_queue_item(row["id"], slot.isoformat())
         rescheduled += 1
+        occupied.add(slot.date().isoformat())
 
     if rescheduled < len(pending_sorted):
         logger.warning("Only rescheduled %s/%s items due to limited slots.", rescheduled, len(pending_sorted))

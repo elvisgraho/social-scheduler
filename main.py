@@ -23,6 +23,8 @@ from src.database import (
     reschedule_queue_item,
     set_config,
     set_account_state,
+    export_config,
+    import_config,
     cleanup_uploaded
 )
 from src.logging_utils import get_log_file_path, init_logging, tail_log, log_once
@@ -30,7 +32,7 @@ from src.notifier import send_telegram_message, telegram_enabled
 from src.platform_registry import all_platform_statuses, get_platforms
 from src.platforms import tiktok as tiktok_platform
 from src.platforms import instagram as instagram_platform
-from src.scheduling import get_schedule, human_readable_schedule, next_slots, save_schedule
+from src.scheduling import get_schedule, human_readable_schedule, next_slots, next_daily_slots, save_schedule
 
 # Import the logic module
 from src import ui_logic
@@ -51,14 +53,41 @@ logger.debug("Uploads directory ready at %s", UPLOAD_DIR)
 
 # --- UI Components ---
 
+def refresh_platform_statuses():
+    """
+    Actively re-check platform connectivity so the badge row reflects current reality.
+    """
+    results = []
+    yt_ok, yt_msg = verify_youtube_credentials(probe_api=True)
+    results.append(("YouTube", yt_ok, yt_msg))
+
+    ig_ok, ig_msg = instagram_platform.verify_login()
+    results.append(("Instagram", ig_ok, ig_msg))
+
+    tt_ok, tt_msg = tiktok_platform.verify_session(force=True)
+    results.append(("TikTok", tt_ok, tt_msg))
+
+    return results
+
+
 def render_platform_status_badge():
     """Renders the top status row for platforms."""
+    st.caption("Connections")
+    refresh_col, _ = st.columns([1, 3])
+    if refresh_col.button("Refresh statuses"):
+        st.session_state["status_results"] = refresh_platform_statuses()
+        st.rerun()
+
     statuses = all_platform_statuses()
     registry = get_platforms()
     cols = st.columns(len(registry))
     
     for col, (key, cfg) in zip(cols, registry.items()):
-        connected = cfg["connected"]()
+        state = statuses.get(key, {})
+        # Consider both the live check and the persisted account_state flag to avoid stale "Connected" labels.
+        live_connected = cfg["connected"]()
+        state_connected = bool(state.get("connected"))
+        connected = live_connected and state_connected
         label = cfg["label"]
         
         if connected:
@@ -66,10 +95,18 @@ def render_platform_status_badge():
         else:
             col.warning(f"{label}\nNot linked")
             
-        state = statuses.get(key, {})
         error = state.get("last_error")
-        if error and not connected:
+        if error:
             col.caption(f"Error: {error}")
+
+    # If we just ran a refresh, surface the results inline
+    recent = st.session_state.pop("status_results", None)
+    if recent:
+        for name, ok, message in recent:
+            if ok:
+                st.success(f"{name}: OK")
+            else:
+                st.warning(f"{name}: {message}")
 
 def render_dashboard_tab(queue_rows):
     st.subheader("Status Overview")
@@ -121,6 +158,13 @@ def render_dashboard_tab(queue_rows):
                 st.info(f"No videos waiting. Next available slot: {upcoming[0].strftime('%b %d %H:%M %Z')}")
             else:
                 st.warning("No valid schedule slots configured. Please check Settings.")
+
+    failed_rows = [row for row in queue_rows if row.get("status") == "failed"]
+    if failed_rows:
+        st.markdown("### Recent failures")
+        for row in failed_rows[:5]:
+            msg = row.get("last_error") or "Unknown error"
+            st.warning(f"#{row['id']} on {ui_logic.format_datetime_for_ui(row.get('scheduled_for') or '')}: {msg}")
 
 def render_queue_tab(queue_rows):
     st.subheader("Upload & Queue")
@@ -215,7 +259,8 @@ def render_queue_tab(queue_rows):
     # -- Upload Logic --
     if uploaded_files:
         start_dt = ui_logic.get_schedule_start_time(queue_rows)
-        slots = next_slots(len(uploaded_files), start=start_dt)
+        occupied = ui_logic.occupied_schedule_dates(queue_rows)
+        slots = next_daily_slots(len(uploaded_files), start=start_dt, occupied_dates=occupied)
         
         if len(slots) < len(uploaded_files):
             st.error(f"Not enough schedule slots available in the next 90 days. Needed {len(uploaded_files)}, found {len(slots)}.")
@@ -283,7 +328,11 @@ def render_queue_tab(queue_rows):
                         
                     if b_col2.button("Reschedule (Next Slot)", key=f"rsc_{row['id']}"):
                         anchor = ui_logic.parse_iso(row.get("scheduled_for")) or ui_logic.get_schedule_start_time(queue_rows)
-                        future = next_slots(1, start=anchor)
+                        occupied = ui_logic.occupied_schedule_dates(queue_rows)
+                        curr_dt = ui_logic.parse_iso(row.get("scheduled_for"))
+                        if curr_dt:
+                            occupied.discard(curr_dt.date().isoformat())
+                        future = next_daily_slots(1, start=anchor, occupied_dates=occupied)
                         if future:
                             reschedule_queue_item(row["id"], future[0].isoformat())
                             logger.info("Rescheduled queue item %s to %s.", row["id"], future[0].isoformat())
@@ -506,6 +555,32 @@ def render_settings_tab():
         send_telegram_message("Test from Social Scheduler UI.")
         logger.info("Test Telegram notification dispatched.")
         st.success("Sent.")
+
+    st.markdown("### Backup & Restore")
+    backup_payload = json.dumps(export_config(), indent=2)
+    st.download_button(
+        "Download config backup",
+        data=backup_payload,
+        file_name="scheduler-config-backup.json",
+        mime="application/json",
+        help="Includes settings and platform state (not video files).",
+    )
+
+    with st.expander("Restore from backup", expanded=False):
+        raw_backup = st.text_area("Paste backup JSON", height=200)
+        if st.button("Restore backup"):
+            if not raw_backup.strip():
+                st.warning("Paste a backup first.")
+            else:
+                try:
+                    payload = json.loads(raw_backup)
+                    settings_count, accounts_count = import_config(payload)
+                    logger.info("Backup restored (settings=%s, accounts=%s).", settings_count, accounts_count)
+                    st.success(f"Restored {settings_count} settings and {accounts_count} account states. Please refresh.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Restore failed: {exc}")
+                    logger.error("Backup restore error: %s", exc)
 
 def render_logs_tab():
     st.subheader("System Logs")

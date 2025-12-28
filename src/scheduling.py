@@ -87,6 +87,37 @@ def next_slots(count: int, start: Optional[datetime] = None) -> List[datetime]:
     return slots
 
 
+def next_daily_slots(
+    count: int,
+    start: Optional[datetime] = None,
+    occupied_dates: Optional[set] = None,
+) -> List[datetime]:
+    """
+    Like next_slots but enforces at most one slot per calendar day by skipping dates
+    already occupied (YYYY-MM-DD in the configured timezone).
+    """
+    occupied_dates = occupied_dates or set()
+    cfg = get_schedule()
+    tz = pytz.timezone(cfg["timezone"])
+    now = datetime.now(tz) if start is None else (start if start.tzinfo else tz.localize(start)).astimezone(tz)
+
+    slots: List[datetime] = []
+    day_offset = 0
+    while len(slots) < count and day_offset < 90:
+        candidate_date = (now + timedelta(days=day_offset)).date()
+        weekday = candidate_date.weekday()
+        day_key = candidate_date.isoformat()
+        if weekday in cfg["days"] and day_key not in occupied_dates:
+            for ts in cfg["times"]:
+                dt = tz.localize(datetime.combine(candidate_date, _parse_time(ts)))
+                if dt <= now:
+                    continue
+                slots.append(dt)
+                break
+        day_offset += 1
+    return slots
+
+
 def human_readable_schedule() -> str:
     cfg = get_schedule()
     days_map = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
