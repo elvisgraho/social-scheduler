@@ -1,8 +1,6 @@
 import os
 import time
-import json
 import requests
-import random
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
@@ -17,8 +15,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException, 
     NoSuchElementException, 
-    ElementClickInterceptedException,
-    WebDriverException
+    ElementClickInterceptedException
 )
 
 from src.logging_utils import init_logging
@@ -138,31 +135,43 @@ def verify_session(force: bool = True) -> Tuple[bool, str]:
 
 # --- ROBUST UPLOAD IMPLEMENTATION ---
 
-def _handle_cookie_banner(driver):
+def _dismiss_dialogs(driver):
     """
-    Specifically targets the 'Decline optional cookies' button seen in the screenshot.
+    Dismisses all known popups seen in the screenshots:
+    1. 'Turn on automatic content checks?' -> Click Cancel
+    2. 'New editing features added' -> Click Got it
+    3. Cookie Banner -> Click Decline
     """
-    try:
-        # Look for the specific decline button (exact text match based on screenshot)
-        decline_btn = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Decline optional cookies')] | //button[contains(text(), 'Allow all')]"))
-        )
-        decline_btn.click()
-        logger.debug("Cookie banner dismissed.")
-        time.sleep(1) # Wait for animation
-    except Exception:
-        # Banner might not be there or already handled
-        pass
+    logger.debug("Scanning for blocking dialogs...")
+    
+    # List of XPaths for various annoying buttons
+    targets = [
+        "//button[contains(text(), 'Got it')]",  # New features modal
+        "//button[contains(text(), 'Cancel')]",  # Content check modal
+        "//div[contains(text(), 'automatic content checks')]//button[contains(text(), 'Cancel')]", # Specific content check
+        "//button[contains(text(), 'Decline optional cookies')]", # Cookie banner
+        "//button[contains(text(), 'Allow all')]" # Alternate cookie banner
+    ]
+
+    for xpath in targets:
+        try:
+            # Short wait to see if element exists
+            btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((By.XPATH, xpath)))
+            logger.info(f"Dismissing dialog button: {xpath}")
+            driver.execute_script("arguments[0].click();", btn)
+            time.sleep(1) # Wait for animation to clear to prevent crash
+        except TimeoutException:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to click dialog {xpath}: {e}")
 
 def _debug_dump(driver, queue_name="error"):
-    """Saves screenshot and HTML to debug empty error messages."""
+    """Saves screenshot to debug crashes."""
     try:
         ts = datetime.now().strftime("%H%M%S")
         debug_dir = os.path.join("data", "logs")
         os.makedirs(debug_dir, exist_ok=True)
-        
         screen_path = os.path.join(debug_dir, f"tiktok_{queue_name}_{ts}.png")
-        
         driver.save_screenshot(screen_path)
         logger.error(f"Debug screenshot saved: {screen_path}")
     except Exception as e:
@@ -175,17 +184,15 @@ def upload(video_path: str, description: str):
 
     logger.info("Starting TikTok upload for %s...", os.path.basename(video_path))
 
-    # 1. Chromium Options for Stability on Pi/ARM
+    # 1. Stability Options for Raspberry Pi
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-infobars")
-    # New flags to prevent 'Stacktrace' crashes on ARM
-    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-software-rasterizer") # Fix for 0xaaaa crash
     options.add_argument("--disable-extensions")
-    
     options.add_argument("--window-size=1920,1080")
     options.add_argument(f"user-agent={USER_AGENT}")
     
@@ -200,7 +207,7 @@ def upload(video_path: str, description: str):
     try:
         driver = webdriver.Chrome(service=service, options=options)
         
-        # 2. Advanced CDP Stealth
+        # 2. Stealth Scripts
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -220,13 +227,13 @@ def upload(video_path: str, description: str):
         })
         
         driver.refresh()
-        time.sleep(2)
+        time.sleep(3)
         driver.get("https://www.tiktok.com/upload?lang=en")
 
-        # 4. Handle Overlays (Cookie Banner) - CRITICAL FIX
-        _handle_cookie_banner(driver)
+        # 4. Aggressive Initial Cleanup
+        _dismiss_dialogs(driver)
 
-        # 5. Iframe Detection
+        # 5. Iframe Switch
         wait = WebDriverWait(driver, 10)
         try:
             iframe = wait.until(EC.presence_of_element_located((By.XPATH, "//iframe[contains(@src, 'upload')]")))
@@ -236,22 +243,22 @@ def upload(video_path: str, description: str):
             pass
 
         # 6. File Input
-        # Add delay to ensure render process is stable before heavy file op
-        time.sleep(2)
-        
+        time.sleep(2) # Stabilize before heavy IO
         file_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
         file_input.send_keys(os.path.abspath(video_path))
 
-        # 7. Wait for Upload Success
-        # Wait for "Uploaded" text or progress bar completion
-        logger.debug("Waiting for video processing...")
+        # 7. Wait for Upload & Processing
+        logger.debug("Waiting for video upload processing...")
         WebDriverWait(driver, 180).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//div[contains(text(), 'Uploaded')] | //div[contains(@class, 'uploaded')] | //div[text()='100%']")
             )
         )
         
-        # 8. Caption Input
+        # 8. Check for Mid-Process Popups (Content Checks appear here)
+        _dismiss_dialogs(driver)
+
+        # 9. Caption
         try:
             caption_box = driver.find_element(By.CSS_SELECTOR, ".public-DraftEditor-content")
         except NoSuchElementException:
@@ -265,30 +272,37 @@ def upload(video_path: str, description: str):
             time.sleep(0.5)
             ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
             time.sleep(0.5)
-            # Filter emoji or complex chars if they cause issues, but usually fine
             ActionChains(driver).send_keys(description).perform()
 
-        # 9. Handle "Post" Button
+        # 10. Final Popup Sweep before Posting
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        
-        # Ensure button is active
+        _dismiss_dialogs(driver)
+
+        # 11. Find Post Button
         post_btn = wait.until(EC.presence_of_element_located(
             (By.XPATH, "//button[div[text()='Post']] | //button[text()='Post']")
         ))
         
-        # 10. Wait for Copyright Check (Disabled state)
+        # 12. Wait for Enabled State
+        logger.debug("Waiting for Post button enablement...")
         for i in range(30):
             if post_btn.get_attribute("disabled") is None:
                 break
             time.sleep(1)
             
-        # 11. Click Post
+        # 13. Click Post
+        logger.info("Clicking Post...")
         try:
             post_btn.click()
         except ElementClickInterceptedException:
+            # If intercepted, it's likely a persistent overlay we missed. Nuke it.
+            driver.execute_script("""
+                document.querySelectorAll('div[class*="modal"], div[class*="mask"]').forEach(el => el.remove());
+            """)
+            time.sleep(1)
             driver.execute_script("arguments[0].click();", post_btn)
 
-        # 12. Final Verification
+        # 14. Success Verification
         WebDriverWait(driver, 60).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//div[contains(text(), 'Manage your posts')] | //div[contains(text(), 'Your video is being uploaded')] | //div[contains(text(), 'Upload another')]")
@@ -303,8 +317,7 @@ def upload(video_path: str, description: str):
             _debug_dump(driver, "upload_failure")
             
         err_msg = str(exc).split("\n")[0]
-        # Add hint for the specific crash seen in logs
-        if "Stacktrace" in str(exc) and "#0" in str(exc):
+        if "Stacktrace" in str(exc):
             err_msg = "Browser Crash (Memory/Driver). Check debug screenshot."
             
         logger.error(f"TikTok Upload Failed: {exc}")

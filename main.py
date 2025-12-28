@@ -229,37 +229,44 @@ def render_queue_tab(queue_rows):
 
     # Force Run Buttons (next item + per-platform)
     platforms = get_platforms()
-    action_cols = st.columns(len(platforms) + 2)
+    platform_keys = list(platforms.keys())
+    platform_labels = {k: cfg["label"] for k, cfg in platforms.items()}
 
+    action_cols = st.columns([2, 1])
     force_now = action_cols[0].button(
         "Upload next now",
         help="Process the next queued item immediately.",
         type="primary",
         disabled=not has_queue_items,
+        key="force_next_btn",
     )
-
-    forced_platform = None
-    forced_label = None
-    for idx, (p_key, p_cfg) in enumerate(platforms.items(), start=1):
-        label = p_cfg["label"]
-        btn = action_cols[idx].button(
-            f"Upload to {label}",
-            key=f"force_{p_key}",
-            help=f"Post the next queued item to {label} only.",
-            disabled=not has_queue_items,
-        )
-        if btn:
-            if not p_cfg["connected"]():
-                st.warning(f"{label} is not connected.")
-            else:
-                forced_platform = p_key
-                forced_label = label
-
-    delete_next = action_cols[-1].button(
+    delete_next = action_cols[1].button(
         "Delete Next In Queue",
         help="Remove the next queued item and its file.",
         type="secondary",
         disabled=not bool(queue_rows),
+        key="delete_next_btn",
+    )
+
+    # Single, stable selector avoids duplicate per-platform buttons after reruns.
+    platform_cols = st.columns([3, 1])
+    if platform_keys:
+        selected_platform = platform_cols[0].selectbox(
+            "Upload next only to",
+            options=platform_keys,
+            format_func=lambda k: platform_labels.get(k, k.title()),
+            key="force_platform_select",
+            help="Limit the next run to a single platform.",
+        )
+    else:
+        selected_platform = None
+        platform_cols[0].warning("No platforms available.")
+
+    force_platform_btn = platform_cols[1].button(
+        "Upload to platform",
+        key="force_platform_btn",
+        help="Post the next queued item only to the selected platform.",
+        disabled=not (has_queue_items and selected_platform),
     )
 
     if force_now:
@@ -276,16 +283,18 @@ def render_queue_tab(queue_rows):
             st.warning("Click again to confirm immediate upload.")
             st.session_state["force_now_confirmed"] = True
 
-    if forced_platform:
+    if force_platform_btn and selected_platform:
         if not has_queue_items:
             st.warning("No queued videos to upload.")
+        elif not platforms[selected_platform]["connected"]():
+            st.warning(f"{platform_labels[selected_platform]} is not connected.")
         else:
-            set_config("queue_force_platform", forced_platform)
+            set_config("queue_force_platform", selected_platform)
             set_config("queue_force_run", 1)
-            logger.info("Force upload requested for %s only.", forced_platform)
+            logger.info("Force upload requested for %s only.", selected_platform)
             st.session_state["queue_notice"] = {
                 "level": "success",
-                "text": f"Next item will upload to {forced_label} only.",
+                "text": f"Next item will upload to {platform_labels[selected_platform]} only.",
             }
             st.session_state["force_now_confirmed"] = False
             st.rerun()
