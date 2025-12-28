@@ -15,7 +15,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException, 
     NoSuchElementException, 
-    WebDriverException
+    StaleElementReferenceException,
+    ElementClickInterceptedException
 )
 
 from src.logging_utils import init_logging
@@ -133,36 +134,77 @@ def verify_session(force: bool = True) -> Tuple[bool, str]:
     return ok, message
 
 
-# --- SMART ROBUST UPLOAD IMPLEMENTATION ---
+# --- SAFE SELENIUM UTILS ---
 
-def _purge_annoyances(driver):
+def _wait_for_spinner(driver):
+    """Waits for the loading spinner (dots) to disappear."""
+    try:
+        # Generic loader detection
+        WebDriverWait(driver, 5).until(
+            EC.invisibility_of_element_located((By.XPATH, "//div[contains(@class, 'loader')] | //div[contains(@class, 'loading')]"))
+        )
+    except Exception:
+        pass # If check fails, assume loaded or spinner not found
+
+def _safe_click(driver, xpath, timeout=10):
     """
-    The Nuclear Option: Instead of clicking 'Cancel' or 'Decline',
-    we purely delete the overlay elements from the DOM.
-    This prevents click interception and renderer crashes on low-resource devices.
+    Tries to click an element. If StaleElementReference occurs, 
+    it re-finds the element and retries up to 3 times.
     """
-    logger.debug("Purging visual obstructions (Modals/Overlays)...")
+    for attempt in range(3):
+        try:
+            element = WebDriverWait(driver, timeout).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            element.click()
+            return True
+        except StaleElementReferenceException:
+            logger.debug(f"Stale element on click {xpath}, retrying ({attempt+1})...")
+            time.sleep(1)
+        except ElementClickInterceptedException:
+            # Fallback to JS click if overlapped
+            try:
+                element = driver.find_element(By.XPATH, xpath)
+                driver.execute_script("arguments[0].click();", element)
+                return True
+            except:
+                pass
+            time.sleep(1)
+        except Exception:
+            return False
+    return False
+
+def _dismiss_popups_safely(driver):
+    """
+    Targeted removal of known obstructions without destroying app state.
+    """
+    logger.debug("Checking for blocking dialogs...")
+    
+    # 1. Try Clicking "Cancel" or "Decline" buttons first (Best Practice)
+    buttons = [
+        "//button[contains(text(), 'Decline optional cookies')]",
+        "//button[contains(text(), 'Allow all')]", # Sometimes easier to just allow to clear it
+        "//button[contains(text(), 'Cancel')]",
+        "//button[contains(text(), 'Got it')]"
+    ]
+    
+    for btn_xpath in buttons:
+        _safe_click(driver, btn_xpath, timeout=2)
+
+    # 2. Gentle DOM Cleanup (Only remove masks/overlays, not dialog containers)
     try:
         driver.execute_script("""
-            // 1. Remove standard Modal Dialogs (The center popup)
-            document.querySelectorAll('div[role="dialog"]').forEach(el => el.remove());
+            // Remove dark backdrops that capture clicks
+            document.querySelectorAll('div[class*="mask"], div[class*="overlay"]').forEach(el => el.remove());
             
-            // 2. Remove Cookie Banners (The bottom blue banner)
-            document.querySelectorAll('div[id*="cookie"], div[class*="cookie"]').forEach(el => el.remove());
-            document.querySelectorAll('div[class*="banner"]').forEach(el => el.remove());
-            
-            // 3. Remove Feature Discovery Tooltips (The right-side popup)
-            document.querySelectorAll('div[class*="guide"], div[class*="popover"], div[class*="tooltip"]').forEach(el => el.remove());
-            
-            // 4. Remove Generic Overlays (Masks that dim the screen)
-            document.querySelectorAll('div[class*="overlay"], div[class*="mask"]').forEach(el => el.remove());
+            // Remove specific cookie banners if buttons failed
+            document.querySelectorAll('div[id*="cookie-banner"], div[class*="cookie-banner"]').forEach(el => el.remove());
         """)
-        time.sleep(0.5) # Allow renderer to catch up
-    except Exception as e:
-        logger.warning(f"Purge script error (non-fatal): {e}")
+    except Exception:
+        pass
+
 
 def _debug_dump(driver, queue_name="error"):
-    """Saves screenshot for debugging."""
     try:
         ts = datetime.now().strftime("%H%M%S")
         debug_dir = os.path.join("data", "logs")
@@ -173,6 +215,8 @@ def _debug_dump(driver, queue_name="error"):
     except Exception:
         pass
 
+# --- UPLOAD FUNCTION ---
+
 def upload(video_path: str, description: str):
     ok, session_id, info = ensure_session_valid()
     if not ok or not session_id:
@@ -180,19 +224,17 @@ def upload(video_path: str, description: str):
 
     logger.info("Starting TikTok upload for %s...", os.path.basename(video_path))
 
-    # 1. Chromium Options for Raspberry Pi Stability
+    # 1. Options
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-infobars")
-    # Anti-crash flags for ARM
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--disable-extensions")
     options.add_argument("--window-size=1920,1080")
     options.add_argument(f"user-agent={USER_AGENT}")
-    
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -221,39 +263,53 @@ def upload(video_path: str, description: str):
         
         driver.refresh()
         time.sleep(3)
+        
+        # 4. Navigate to Upload
         driver.get("https://www.tiktok.com/upload?lang=en")
+        _wait_for_spinner(driver)
 
-        # 4. Initial Cleanup (Cookie banner often appears instantly)
-        _purge_annoyances(driver)
+        # 5. Handle Initial Popups
+        _dismiss_popups_safely(driver)
 
-        # 5. Iframe Check
-        wait = WebDriverWait(driver, 10)
+        # 6. Iframe Handling
         try:
-            iframe = wait.until(EC.presence_of_element_located((By.XPATH, "//iframe[contains(@src, 'upload')]")))
+            iframe = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//iframe[contains(@src, 'upload')]"))
+            )
             driver.switch_to.frame(iframe)
             logger.debug("Switched to upload iframe.")
         except TimeoutException:
             pass
 
-        # 6. File Input
-        # Heavy operation: Pause to ensure Pi memory is stable
+        # 7. File Input (Retry Logic)
         time.sleep(2)
-        file_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
+        
+        # Find input (retry loop to handle dynamic loading)
+        file_input = None
+        for _ in range(3):
+            try:
+                file_input = driver.find_element(By.XPATH, "//input[@type='file']")
+                break
+            except Exception:
+                time.sleep(1)
+        
+        if not file_input:
+            raise Exception("Could not find file input element.")
+
         file_input.send_keys(os.path.abspath(video_path))
 
-        # 7. Wait for Processing
-        # Wait for "Uploaded" text indicating file is ready
-        logger.debug("Waiting for video processing...")
+        # 8. Wait for Upload Verification
+        logger.debug("Waiting for upload verification...")
         WebDriverWait(driver, 180).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//div[contains(text(), 'Uploaded')] | //div[contains(@class, 'uploaded')] | //div[text()='100%']")
             )
         )
         
-        # 8. Mid-Process Purge (Modals often trigger after upload completes)
-        _purge_annoyances(driver)
+        # 9. Handle Post-Upload Dialogs
+        _dismiss_popups_safely(driver)
 
-        # 9. Caption
+        # 10. Caption
         try:
             caption_box = driver.find_element(By.CSS_SELECTOR, ".public-DraftEditor-content")
         except NoSuchElementException:
@@ -263,36 +319,43 @@ def upload(video_path: str, description: str):
                 caption_box = None
             
         if caption_box and description:
-            # Use JS click to avoid focus issues
-            driver.execute_script("arguments[0].click();", caption_box)
-            time.sleep(0.5)
-            ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
-            time.sleep(0.5)
-            ActionChains(driver).send_keys(description).perform()
+            try:
+                driver.execute_script("arguments[0].click();", caption_box)
+                time.sleep(0.5)
+                ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
+                time.sleep(0.5)
+                ActionChains(driver).send_keys(description).perform()
+            except Exception:
+                logger.warning("Caption entry failed, skipping.")
 
-        # 10. Final Purge before Posting
+        # 11. Final Scroll & Popup Check
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        _purge_annoyances(driver)
+        _dismiss_popups_safely(driver)
 
-        # 11. Find Post Button
-        post_btn = wait.until(EC.presence_of_element_located(
-            (By.XPATH, "//button[div[text()='Post']] | //button[text()='Post']")
-        ))
+        # 12. Robust Post Click
+        # We define the xpath for the post button
+        post_btn_xpath = "//button[div[text()='Post']] | //button[text()='Post']"
         
-        # 12. Wait for Enablement (Copyright checks)
-        logger.debug("Waiting for Post button enablement...")
-        for i in range(30):
-            # Check disabled attribute directly
-            if post_btn.get_attribute("disabled") is None:
-                break
+        # Wait for it to be visible
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, post_btn_xpath)))
+        
+        # Wait for "Disabled" state to clear (Copyright checks)
+        logger.debug("Waiting for button enablement...")
+        for _ in range(40):
+            try:
+                btn = driver.find_element(By.XPATH, post_btn_xpath)
+                if btn.get_attribute("disabled") is None:
+                    break
+            except StaleElementReferenceException:
+                pass # Refetch on next loop
             time.sleep(1)
-            
-        # 13. JS Click (The "God Mode" Click)
-        # Bypasses any remaining invisible overlays
-        logger.info("Executing JS Click on Post...")
-        driver.execute_script("arguments[0].click();", post_btn)
 
-        # 14. Verify
+        # Use safe click wrapper which handles StaleElement internally
+        logger.info("Clicking Post...")
+        if not _safe_click(driver, post_btn_xpath):
+            raise Exception("Failed to click Post button after multiple attempts.")
+
+        # 13. Verify Success
         WebDriverWait(driver, 60).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//div[contains(text(), 'Manage your posts')] | //div[contains(text(), 'Your video is being uploaded')] | //div[contains(text(), 'Upload another')]")
@@ -307,8 +370,10 @@ def upload(video_path: str, description: str):
             _debug_dump(driver, "upload_failure")
             
         err_msg = str(exc).split("\n")[0]
-        if "Stacktrace" in str(exc):
+        if "Stacktrace" in str(exc) or "crash" in str(exc).lower():
             err_msg = "Browser Crash (Memory/Driver). Check debug screenshot."
+        elif "StaleElementReference" in str(exc):
+            err_msg = "UI updated unexpectedly (Stale Element). Retrying next cycle."
             
         logger.error(f"TikTok Upload Failed: {exc}")
         set_account_state("tiktok", False, err_msg)
@@ -316,4 +381,7 @@ def upload(video_path: str, description: str):
         
     finally:
         if driver:
-            driver.quit()
+            try:
+                driver.quit()
+            except:
+                pass

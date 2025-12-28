@@ -698,7 +698,7 @@ def render_logs_tab():
     col1, col2, col3, col4 = st.columns([1.2, 1, 1, 2])
     view_choice = col1.selectbox(
         "View window",
-        options=[("Last 200 lines", 200), ("Last 500 lines", 500), ("Last 1000 lines", 1000), ("Entire file", None)],
+        options=[("Last 20 lines", 20), ("Last 120 lines", 120), ("Last 1000 lines", 1000), ("Entire file", None)],
         format_func=lambda opt: opt[0],
         index=0,
         key="log_view_window",
