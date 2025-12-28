@@ -20,6 +20,8 @@ from src.database import (
     delete_from_queue,
     get_config,
     get_queue,
+    get_uploaded_count,
+    get_uploaded_items,
     init_db,
     reschedule_queue_item,
     set_config,
@@ -119,15 +121,15 @@ def render_platform_status_badge():
             else:
                 st.warning(f"{name}: {message}")
 
-def render_dashboard_tab(queue_rows):
+def render_dashboard_tab(queue_rows, uploaded_count: int):
     st.subheader("Status Overview")
     
     try:
         pending = sum(1 for row in queue_rows if row["status"] in ("pending", "retry"))
         processing = sum(1 for row in queue_rows if row["status"] == "processing")
-        uploaded = sum(1 for row in queue_rows if row["status"] == "uploaded")
+        uploaded = uploaded_count
     except Exception:
-        pending, processing, uploaded = 0, 0, 0
+        pending, processing, uploaded = 0, 0, uploaded_count
     
     # Metrics
     metrics = st.columns(4)
@@ -180,7 +182,7 @@ def render_dashboard_tab(queue_rows):
             msg = row.get("last_error") or "Unknown error"
             st.warning(f"#{row['id']} on {ui_logic.format_datetime_for_ui(row.get('scheduled_for') or '')}: {msg}")
 
-def render_queue_tab(queue_rows):
+def render_queue_tab(queue_rows, uploaded_rows):
     st.subheader("Upload & Queue")
 
     # Display Notice (persisted across reruns)
@@ -394,6 +396,36 @@ def render_queue_tab(queue_rows):
             "Last Error": st.column_config.TextColumn("Last Error", width="large")
         },
     )
+
+    # Recent uploads
+    st.markdown("### Recent uploads")
+    if uploaded_rows:
+        uploaded_df = []
+        for row in uploaded_rows:
+            uploaded_df.append({
+                "Upload ID": row.get("id"),
+                "Queue ID": row.get("queue_id"),
+                "File": Path(row.get("file_path") or "").name,
+                "Uploaded": ui_logic.format_uploaded_time(row.get("uploaded_at")),
+            })
+        st.dataframe(
+            uploaded_df,
+            width="stretch",
+            hide_index=True,
+        )
+        with st.expander("Uploaded item details"):
+            for row in uploaded_rows[:50]:
+                st.write(f"Upload #{row.get('id')} (queue #{row.get('queue_id')}) - {Path(row.get('file_path') or '').name}")
+                st.caption(f"Uploaded: {ui_logic.format_uploaded_time(row.get('uploaded_at'))}")
+                logs = row.get("platform_logs")
+                if logs:
+                    try:
+                        st.json(json.loads(logs))
+                    except Exception:
+                        st.text(logs)
+                st.markdown("---")
+    else:
+        st.info("No uploaded items recorded yet.")
 
     # -- Item Management --
     if queue_rows:
@@ -751,6 +783,8 @@ st.caption("Centralized Short Video Publishing")
 
 # Load data once per render
 queue_data = get_queue()
+uploaded_count = get_uploaded_count()
+uploaded_rows = get_uploaded_items(200)
 
 render_platform_status_badge()
 st.divider()
@@ -758,10 +792,10 @@ st.divider()
 tabs = st.tabs(["Dashboard", "Queue", "Accounts", "Settings", "Logs"])
 
 with tabs[0]:
-    render_dashboard_tab(queue_data)
+    render_dashboard_tab(queue_data, uploaded_count)
 
 with tabs[1]:
-    render_queue_tab(queue_data)
+    render_queue_tab(queue_data, uploaded_rows)
 
 with tabs[2]:
     render_accounts_tab()

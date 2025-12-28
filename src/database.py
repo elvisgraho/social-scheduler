@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 DB_FILE = "data/scheduler.db"
@@ -60,7 +61,9 @@ def init_db() -> None:
     )
 
     conn.commit()
+    _ensure_uploads_table(conn)
     _ensure_queue_columns(conn)
+    _migrate_uploaded_rows(conn)
     conn.close()
 
 
@@ -81,6 +84,58 @@ def _ensure_queue_columns(conn: sqlite3.Connection) -> None:
         if column not in existing:
             conn.execute(ddl)
     conn.commit()
+
+
+def _ensure_uploads_table(conn: sqlite3.Connection) -> None:
+    """
+    New table to store completed uploads separately from the active queue.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uploads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            queue_id INTEGER,
+            file_path TEXT,
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            title TEXT,
+            description TEXT,
+            platform_logs TEXT
+        )
+        """
+    )
+    conn.commit()
+
+
+def _migrate_uploaded_rows(conn: sqlite3.Connection) -> None:
+    """
+    Move any legacy queue rows with status='uploaded' into the uploads table.
+    """
+    try:
+        rows = conn.execute("SELECT * FROM queue WHERE status = 'uploaded'").fetchall()
+        if not rows:
+            return
+
+        for row in rows:
+            row_dict = dict(row)
+            conn.execute(
+                """
+                INSERT INTO uploads (queue_id, file_path, title, description, platform_logs)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    row_dict.get("id"),
+                    row_dict.get("file_path"),
+                    row_dict.get("title"),
+                    row_dict.get("description"),
+                    row_dict.get("platform_logs"),
+                ),
+            )
+            conn.execute("DELETE FROM queue WHERE id = ?", (row_dict.get("id"),))
+        conn.commit()
+    except Exception:
+        # Best-effort migration; do not block startup
+        conn.rollback()
+        pass
 
 
 def set_config(key: str, value: Any) -> None:
@@ -162,6 +217,7 @@ def get_queue(limit: int = 100) -> List[Dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT * FROM queue
+        WHERE status != 'uploaded'
         ORDER BY
             CASE WHEN scheduled_for IS NULL THEN 1 ELSE 0 END,
             scheduled_for ASC,
@@ -250,27 +306,6 @@ def delete_from_queue(queue_id: int) -> None:
     conn.close()
 
 
-def get_uploaded_items(limit: int = 100) -> List[Dict[str, Any]]:
-    """
-    Return the oldest uploaded items first so cleanup can prune them.
-    """
-    conn = get_conn()
-    rows = conn.execute(
-        """
-        SELECT * FROM queue
-        WHERE status = 'uploaded'
-        ORDER BY
-            CASE WHEN scheduled_for IS NULL THEN 1 ELSE 0 END,
-            scheduled_for ASC,
-            created_at ASC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-
 def cleanup_uploaded(count: int) -> Tuple[int, int]:
     """
     Delete the oldest uploaded items and remove their files from disk.
@@ -289,7 +324,7 @@ def cleanup_uploaded(count: int) -> Tuple[int, int]:
                 os.remove(file_path)
             except Exception:
                 pass
-        delete_from_queue(row["id"])
+        delete_uploaded_item(row["id"])
         deleted += 1
     return deleted, freed_bytes
 
@@ -327,6 +362,67 @@ def get_all_account_states() -> Dict[str, Dict[str, Any]]:
     rows = conn.execute("SELECT * FROM account_state").fetchall()
     conn.close()
     return {row["platform"]: dict(row) for row in rows}
+
+
+# --- Upload Archive ---
+
+def archive_uploaded_item(queue_row: Dict[str, Any], platform_logs: Optional[Dict[str, Any]]) -> None:
+    """
+    Persist completed uploads to the uploads table and remove from the active queue.
+    """
+    conn = get_conn()
+    logs_json = json.dumps(platform_logs or {})
+    uploaded_at = datetime.utcnow().isoformat()
+    try:
+        conn.execute(
+            """
+            INSERT INTO uploads (queue_id, file_path, uploaded_at, title, description, platform_logs)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                queue_row.get("id"),
+                queue_row.get("file_path"),
+                uploaded_at,
+                queue_row.get("title"),
+                queue_row.get("description"),
+                logs_json,
+            ),
+        )
+        conn.execute("DELETE FROM queue WHERE id = ?", (queue_row.get("id"),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_uploaded_item(upload_id: int) -> None:
+    conn = get_conn()
+    conn.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_uploaded_items(limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Return the oldest uploaded items first so cleanup can prune them.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT * FROM uploads
+        ORDER BY uploaded_at DESC, id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_uploaded_count() -> int:
+    conn = get_conn()
+    row = conn.execute("SELECT COUNT(*) AS cnt FROM uploads").fetchone()
+    conn.close()
+    return row["cnt"] if row else 0
 
 
 # --- Backup & Restore ---

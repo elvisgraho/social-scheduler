@@ -166,6 +166,28 @@ def format_datetime_for_ui(value: Optional[str]) -> str:
     local_dt = dt.astimezone(local_tz)
     return local_dt.strftime("%b %d, %Y %H:%M")
 
+
+def format_uploaded_time(value: Optional[str]) -> str:
+    """
+    Formats uploaded_at which may be ISO or SQLite-style 'YYYY-MM-DD HH:MM:SS'.
+    """
+    if not value:
+        return "Unknown"
+    dt = parse_iso(value)
+    if not dt:
+        try:
+            dt = datetime.fromisoformat(value.replace(" ", "T"))
+        except Exception:
+            return value
+    tz_name = get_schedule().get("timezone", "UTC")
+    try:
+        local_tz = pytz.timezone(tz_name)
+    except pytz.UnknownTimeZoneError:
+        local_tz = pytz.UTC
+    if dt.tzinfo is None:
+        dt = pytz.utc.localize(dt)
+    return dt.astimezone(local_tz).strftime("%b %d, %Y %H:%M")
+
 def extract_tiktok_session(raw_value: str) -> str:
     """Robustly extracts the sessionid from JSON, Cookie headers, or raw strings."""
     if not raw_value:

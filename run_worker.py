@@ -16,6 +16,7 @@ from src.database import (
     set_config,
     update_queue_status,
     reschedule_queue_item,
+    archive_uploaded_item,
 )
 from src.logging_utils import init_logging, log_once
 from src.notifier import send_telegram_message
@@ -165,25 +166,6 @@ def reset_stale_tasks():
         logger.error(f"Failed to reset stale tasks: {e}")
 
 
-def scrub_uploaded_schedule():
-    """
-    Clear scheduled_for timestamps on already uploaded items so they don't
-    continue to appear as the next scheduled post in the UI.
-    """
-    try:
-        uploaded_items = [
-            row for row in get_queue(limit=1000)
-            if row.get("status") == "uploaded" and row.get("scheduled_for")
-        ]
-        if not uploaded_items:
-            return
-        for row in uploaded_items:
-            reschedule_queue_item(row["id"], None)
-        logger.info("Cleared scheduled times for %s uploaded item(s).", len(uploaded_items))
-    except Exception as e:
-        logger.warning(f"Failed to scrub uploaded items: {e}")
-
-
 def process_video(video: dict, forced_platforms: set[str] | None = None) -> None:
     queue_id = video["id"]
     file_path = video["file_path"]
@@ -304,12 +286,7 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
         return
 
     # Success
-    update_queue_status(queue_id, "uploaded", None, current_logs)
-    try:
-        # Clear schedule so completed items don't show up as the next scheduled upload.
-        reschedule_queue_item(queue_id, None)
-    except Exception as exc:
-        logger.warning("Could not clear schedule for uploaded item #%s: %s", queue_id, exc)
+    archive_uploaded_item(video, current_logs)
     _notify(f"Queue #{queue_id} uploaded to all connected platforms.")
 
 
@@ -374,7 +351,6 @@ def main():
     init_db()
     
     reset_stale_tasks()
-    scrub_uploaded_schedule()
     
     schedule.every(1).minutes.do(check_and_post)
     while True:
