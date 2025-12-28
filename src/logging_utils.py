@@ -44,7 +44,7 @@ def _base_logger(level: int) -> logging.Logger:
     logging.captureWarnings(True)
 
     # Keep third-party verbosity reasonable without hiding errors
-    for noisy in ("instagrapi", "urllib3", "selenium"):
+    for noisy in ("instagrapi", "urllib3", "tiktok_uploader"):
         logging.getLogger(noisy).setLevel(logging.INFO)
     return logger
 

@@ -10,11 +10,12 @@ import schedule
 from src.database import (
     get_config,
     get_due_queue,
+    get_queue,
     increment_attempts,
     init_db,
-    set_json_config,
     set_config,
     update_queue_status,
+    reschedule_queue_item,
 )
 from src.logging_utils import init_logging
 from src.notifier import send_telegram_message
@@ -22,7 +23,7 @@ from src.platform_registry import get_platforms
 from src.auth_utils import verify_youtube_credentials
 from src.platforms import instagram as instagram_platform
 from src.platforms import tiktok as tiktok_platform
-from src.scheduling import get_schedule
+from src.scheduling import get_schedule, next_daily_slots
 
 logger = init_logging("worker")
 from src.logging_utils import log_once
@@ -109,6 +110,26 @@ def _maybe_verify_tokens(now: datetime) -> None:
         _run_token_checks(now)
     except Exception as exc:
         logger.warning("Skipping daily token check: %s", exc)
+
+
+def _pull_queue_forward(now: datetime) -> None:
+    """
+    When a force run occurs, shift the remaining pending/retry items to the earliest
+    available daily slots starting now (preserving one-per-day constraint).
+    """
+    try:
+        pending = [row for row in get_queue(limit=200) if row.get("status") in ("pending", "retry")]
+        if not pending:
+            return
+
+        slots = next_daily_slots(len(pending), start=now, occupied_dates=set())
+        if len(slots) < len(pending):
+            logger.warning("Not enough slots to pull queue forward (%s needed, %s available).", len(pending), len(slots))
+        for row, slot in zip(pending, slots):
+            reschedule_queue_item(row["id"], slot.isoformat())
+            logger.info("Pulled queue item %s forward to %s.", row["id"], slot.isoformat())
+    except Exception as exc:
+        logger.warning("Failed to pull queue forward: %s", exc)
 
 
 def _preflight_platform(platform_key: str) -> tuple[bool, str]:
@@ -265,7 +286,6 @@ def check_and_post():
         due = get_due_queue(now.isoformat())
         if not due and force:
             # If forcing and nothing is strictly due, pick the earliest pending/retry
-            from src.database import get_queue
             pending = [row for row in get_queue(limit=200) if row.get("status") in ("pending", "retry")]
             due = pending[:1] if pending else []
         if force:
@@ -285,6 +305,10 @@ def check_and_post():
             
             # Add delay between different videos too
             time.sleep(random.uniform(5, 15))
+        
+        # If we just forced an item and there are more pending/retry items, pull the queue forward
+        if force:
+            _pull_queue_forward(now)
             
     except Exception as e:
         logger.error("Error in check_and_post: %s", e)

@@ -1,6 +1,5 @@
 import json
 from typing import Tuple
-
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -11,9 +10,7 @@ from src.auth_utils import get_youtube_credentials, describe_youtube_http_error
 from src.database import set_account_state, set_config
 
 YOUTUBE_KEY = "youtube_credentials"
-
 logger = init_logging("youtube")
-
 
 def _load_credentials() -> Tuple[bool, str, Credentials]:
     token_json = get_youtube_credentials()
@@ -51,23 +48,21 @@ def upload(video_path: str, title: str, description: str):
             },
         }
         
-        # Fix: Use specific chunksize (4MB) for better memory usage vs -1
+        # Robust Chunking (4MB)
         media = MediaFileUpload(video_path, chunksize=4 * 1024 * 1024, resumable=True)
         request = service.videos().insert(part="snippet,status", body=body, media_body=media)
 
-        # Fix: Robust upload loop instead of simple .execute()
+        logger.info("Starting YouTube upload...")
         response = None
         while response is None:
             status, response = request.next_chunk()
-            if status:
-                logger.info("Uploaded %d%%", int(status.progress() * 100))
             
         video_id = response.get("id")
         set_account_state("youtube", True, None)
         return True, f"Uploaded ID: {video_id}"
 
     except HttpError as e:
-        err_msg = describe_youtube_http_error(e)
+        err_msg = describe_youtube_http_error(e) 
         set_account_state("youtube", False, err_msg)
         return False, err_msg
 
