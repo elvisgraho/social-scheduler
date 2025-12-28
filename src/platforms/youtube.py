@@ -44,7 +44,11 @@ def upload(video_path: str, title: str, description: str):
                 "description": (description or "")[:5000],
                 "categoryId": "22",
             },
-            "status": {"privacyStatus": "public"},
+            "status": {
+                "privacyStatus": "public",
+                "selfDeclaredMadeForKids": False,
+                "notifySubscribers": False,
+            },
         }
         
         # Fix: Use specific chunksize (4MB) for better memory usage vs -1

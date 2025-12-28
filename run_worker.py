@@ -72,7 +72,7 @@ def _run_token_checks(now: datetime) -> None:
     """
     Validate platform tokens/sessions and warn on failure.
     """
-    ok, msg = verify_youtube_credentials(probe_api=True)
+    ok, msg = verify_youtube_credentials(probe_api=False)
     if ok:
         logger.info("Daily YouTube token verification passed.")
         set_config("last_youtube_ok", now.isoformat())

@@ -13,7 +13,9 @@ from src.logging_utils import init_logging
 
 CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob"
+# Require loopback redirect for desktop apps; allow override via env/config.
+DEFAULT_REDIRECT_URI = os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8080")
+REDIRECT_URI_KEY = "google_redirect_uri"
 YOUTUBE_KEY = "youtube_credentials"
 LEGACY_KEYS = ["youtube_token"]
 GOOGLE_CLIENT_CONFIG_KEY = "google_oauth_client"
@@ -34,10 +36,11 @@ def _load_client_config() -> dict:
 
 def _build_flow() -> Flow:
     config = _load_client_config()
+    redirect_uri = get_config(REDIRECT_URI_KEY, DEFAULT_REDIRECT_URI) or DEFAULT_REDIRECT_URI
     return Flow.from_client_config(
         config,
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI,
+        redirect_uri=redirect_uri,
     )
 
 
@@ -46,7 +49,11 @@ def get_google_auth_url() -> Tuple[Optional[str], Optional[str]]:
         flow = _build_flow()
     except FileNotFoundError as exc:
         return None, str(exc)
-    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
+    auth_url, _ = flow.authorization_url(
+        prompt="consent",
+        access_type="offline",
+        include_granted_scopes="true",
+    )
     return auth_url, None
 
 
@@ -59,8 +66,9 @@ def finish_google_auth(auth_code: str) -> Tuple[bool, str]:
         set_account_state("youtube", True, None)
         return True, "YouTube channel linked."
     except Exception as exc:
-        set_account_state("youtube", False, str(exc))
-        return False, str(exc)
+        msg = str(exc)
+        set_account_state("youtube", False, msg)
+        return False, msg
 
 
 def get_youtube_credentials() -> Optional[str]:
@@ -115,9 +123,7 @@ def describe_youtube_http_error(err: HttpError) -> str:
 def verify_youtube_credentials(probe_api: bool = False) -> tuple[bool, str]:
     """
     Attempt to refresh/validate the stored YouTube credentials.
-    If probe_api is True, performs a lightweight public call to confirm
-    YouTube Data API v3 is enabled for the OAuth project without requiring
-    broader scopes than youtube.upload.
+    If probe_api is True, performs a lightweight public call to confirm API availability.
     """
     token_json = get_youtube_credentials()
     if not token_json:
@@ -137,8 +143,8 @@ def verify_youtube_credentials(probe_api: bool = False) -> tuple[bool, str]:
         if probe_api:
             try:
                 service = build("youtube", "v3", credentials=creds, cache_discovery=False)
-                # Public endpoint; should succeed with youtube.upload scope if the API is enabled.
-                service.i18nLanguages().list(part="snippet", hl="en").execute()
+                # Use a low-permission call that aligns with upload scope: just fetch the auth channel ID via channels().list(mine=True)
+                service.channels().list(part="id", mine=True, maxResults=1).execute()
             except HttpError as http_err:
                 msg = describe_youtube_http_error(http_err)
                 set_account_state("youtube", False, msg)

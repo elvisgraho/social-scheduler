@@ -1,6 +1,6 @@
 ## Social Scheduler (Pi-ready)
 
-Upload 7–10 shorts once and auto-post them to YouTube Shorts, Instagram Reels, and TikTok on a shared schedule. Built for Raspberry Pi 8GB, mobile-friendly UI (via Twingate), and local persistence.
+Upload 7–10 shorts once and auto-post them to YouTube Shorts, Instagram Reels, and TikTok on a shared schedule. Built for Raspberry Pi 8GB, mobile-friendly UI, and local persistence.
 
 ### What you need
 - Raspberry Pi (or any Linux host) with Docker or Python 3.11.
@@ -13,9 +13,10 @@ Upload 7–10 shorts once and auto-post them to YouTube Shorts, Instagram Reels,
 ### Quick start (Docker)
 ```bash
 docker build -t social-scheduler .
-docker run -d --name scheduler \
+sudo docker run -d --name scheduler \
   -p 8501:8501 \
   -e TZ="UTC" \
+  -e OAUTH_REDIRECT_URI="http://localhost:8080" \
   --shm-size=1g \
   -v $(pwd)/data:/app/data \
   social-scheduler
@@ -25,11 +26,12 @@ Windows PowerShell:
 docker run -d --name scheduler `
   -p 8501:8501 `
   -e TZ="UTC" `
+  -e OAUTH_REDIRECT_URI="http://localhost:8080" `
   --shm-size=1g `
   -v ${PWD}/data:/app/data `
   social-scheduler
 ```
-UI: `http://<pi-ip>:8501` (open through Twingate on your phone). The `data/` volume holds DB, uploads, cookies/tokens, and logs.
+UI: `http://<pi-ip>:8501`. The `data/` volume holds DB, uploads, cookies/tokens, and logs. OAuth uses the loopback redirect `http://localhost:8080`; when Google redirects there, copy the code from the browser and paste it in the app.
 
 ### Local (no Docker)
 ```bash
@@ -46,10 +48,10 @@ python run_worker.py   # worker (separate shell)
   2) OAuth consent screen: set up External, add your Google account under Test Users.
   3) Credentials: create **OAuth client ID → Desktop app**; download the JSON.
   4) In the app UI (Accounts → Google API Setup), paste the JSON and save.
-  5) Click “Open Google OAuth screen”, sign in, copy the code Google shows, paste it back, and finish. Tokens auto-refresh; reuse this same JSON everywhere.
+  5) Click “Open Google OAuth screen”, sign in, copy the code Google shows (loopback redirect `http://localhost:8080`), paste it back, and finish. Tokens auto-refresh; reuse this same JSON everywhere.
 - **Instagram (recommended: session-based)**
   - Best: grab `sessionid` from a trusted device (browser DevTools Cookies for instagram.com) or paste instagrapi settings JSON. Save it in Accounts → Instagram → session form, then Verify.
-  - Fallback: username/password (expand the fallback form). May trigger challenges; use only if session isn’t available.
+  - Fallback: username/password (expand the fallback form). May trigger challenges; use only if a session isn’t available.
 - **TikTok**
   - Paste `sessionid` in Accounts → TikTok. Accepted formats: raw value (`123...`), cookie header (`sessionid=123...; path=/;`), or DevTools JSON export containing `cookies`/`sessionid`. Verify to confirm; the worker blocks uploads if invalid.
 - **Telegram (optional)**
