@@ -137,10 +137,9 @@ def verify_session(force: bool = True) -> Tuple[bool, str]:
     return ok, message
 
 
-# --- GENTLE INTERACTION UTILS ---
+# --- UTILS ---
 
 def _inject_text_via_js(driver, element, text):
-    """Safely injects text (including Emojis) into a contenteditable."""
     try:
         safe_text = json.dumps(text)
         driver.execute_script(f"""
@@ -154,42 +153,34 @@ def _inject_text_via_js(driver, element, text):
     except Exception as e:
         logger.warning(f"JS Inject failed: {e}")
 
-def _handle_popups_lightweight(driver):
+def _handle_popups_safely(driver):
     """
-    Lightweight popup clicker using direct XPath. 
-    Does NOT use heavy JS scanning to save CPU on Pi 5.
+    Clicks known popups using pure XPath (No complex JS scanning).
+    This fixes CPU usage and avoids the React crash.
     """
-    # Specific buttons we know exist
     targets = [
-        "//button[contains(text(), 'Turn on')]", # Content check
-        "//button[contains(text(), 'Allow all')]", # Cookies
-        "//button[contains(text(), 'Got it')]", # Feature tour
-        "//button[contains(text(), 'Retry')]", # Error page
-        "//div[contains(text(), 'Turn on')]" # Sometimes it's a div
+        "//button[contains(text(), 'Turn on')]", 
+        "//button[contains(text(), 'Allow all')]", 
+        "//button[contains(text(), 'Got it')]",
+        "//button[contains(text(), 'Retry')]",
+        "//div[contains(text(), 'Turn on') and contains(@class, 'button')]" 
     ]
     
-    did_click = False
     for xpath in targets:
         try:
             elements = driver.find_elements(By.XPATH, xpath)
             for el in elements:
                 if el.is_displayed():
-                    try:
-                        driver.execute_script("arguments[0].click();", el)
-                        did_click = True
-                        logger.info(f"Clicked popup: {xpath}")
-                    except:
-                        pass
+                    driver.execute_script("arguments[0].click();", el)
+                    time.sleep(0.5) 
         except:
             pass
             
-    # Escape key is very cheap on CPU and closes most modals
+    # Escape key clears many modals
     try:
         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
     except:
         pass
-        
-    return did_click
 
 def _debug_dump(driver, queue_name="error"):
     try:
@@ -199,19 +190,21 @@ def _debug_dump(driver, queue_name="error"):
         
         screen_path = os.path.join(debug_dir, f"tiktok_{queue_name}_{ts}.png")
         driver.save_screenshot(screen_path)
+        # Save console logs (critical for white screen debugging)
+        log_path = os.path.join(debug_dir, f"tiktok_{queue_name}_{ts}.log")
+        logs = driver.get_log('browser')
+        with open(log_path, "w", encoding="utf-8") as f:
+            for entry in logs:
+                f.write(f"{entry['level']}: {entry['message']}\n")
+                
         logger.error(f"Debug artifacts saved: {screen_path}")
     except Exception:
         pass
 
 def _find_chromedriver():
-    paths = [
-        "/usr/bin/chromedriver",
-        "/usr/lib/chromium-browser/chromedriver",
-        "/usr/local/bin/chromedriver"
-    ]
+    paths = ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver", "/usr/local/bin/chromedriver"]
     for p in paths:
-        if os.path.exists(p):
-            return p
+        if os.path.exists(p): return p
     return "chromedriver"
 
 # --- UPLOAD FUNCTION ---
@@ -226,7 +219,6 @@ def upload(video_path: str, description: str):
 
     logger.info("Starting TikTok upload for %s...", os.path.basename(video_path))
     
-    # --- DRIVER SETUP ---
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -234,11 +226,14 @@ def upload(video_path: str, description: str):
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-extensions")
-    # Standard 1080p to ensure buttons aren't hidden in mobile view
     options.add_argument("--window-size=1920,1080")
     options.add_argument(f"user-agent={USER_AGENT}")
-    # Fix Timezone crash
     options.add_argument("--timezone=Europe/Berlin") 
+    options.page_load_strategy = 'normal'
+    
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
     
     service = Service(_find_chromedriver())
     driver = None
@@ -246,6 +241,10 @@ def upload(video_path: str, description: str):
     try:
         driver = webdriver.Chrome(service=service, options=options)
         
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+        })
+
         # 1. Authenticate
         driver.get("https://www.tiktok.com")
         driver.add_cookie({
@@ -261,84 +260,94 @@ def upload(video_path: str, description: str):
         # 2. Navigate
         driver.get("https://www.tiktok.com/upload?lang=en")
         
-        # 3. Simple File Input Locator
-        logger.debug("Locating file input...")
-        try:
-            # We wait for the input OR the iframe to appear
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@type='file'] | //iframe"))
-            )
-        except TimeoutException:
-            # If we timed out, check for Login redirect
-            if "login" in driver.current_url:
-                return False, "Session expired (Login Redirect)"
-            raise Exception("Page failed to load input")
-
-        # Handle Iframe logic simply
+        # 3. RESTORED: The "Radar" that specifically finds the iframe or input
+        # This worked in previous versions. I have brought it back.
+        logger.debug("Scanning for file input (Radar Mode)...")
         file_input = None
-        try:
-            file_input = driver.find_element(By.XPATH, "//input[@type='file']")
-        except NoSuchElementException:
-            # Check frames
+        
+        # We loop for 60 seconds looking everywhere
+        for i in range(60):
+            # A. Check Main DOM
+            try:
+                file_input = driver.find_element(By.XPATH, "//input[@type='file']")
+                logger.info("Found input in Main DOM.")
+                break
+            except NoSuchElementException:
+                pass
+            
+            # B. Check All Iframes (The critical part for 'just loads' issues)
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            for frame in iframes:
-                driver.switch_to.frame(frame)
-                if len(driver.find_elements(By.XPATH, "//input[@type='file']")) > 0:
-                    file_input = driver.find_element(By.XPATH, "//input[@type='file']")
-                    break
-                driver.switch_to.default_content()
+            found_in_frame = False
+            for index, frame in enumerate(iframes):
+                try:
+                    driver.switch_to.frame(frame)
+                    if len(driver.find_elements(By.XPATH, "//input[@type='file']")) > 0:
+                        file_input = driver.find_element(By.XPATH, "//input[@type='file']")
+                        logger.info(f"Found input in Iframe #{index}.")
+                        found_in_frame = True
+                        break 
+                except:
+                    pass
+                finally:
+                    if not found_in_frame:
+                        driver.switch_to.default_content()
+            
+            if found_in_frame:
+                break
+                
+            # C. Handle potential errors if scanning failed
+            if i % 5 == 0:
+                _handle_popups_safely(driver)
+                
+            time.sleep(1)
         
         if not file_input:
-            raise Exception("File input not found")
+            _debug_dump(driver, "input_missing")
+            raise Exception("Could not locate file input (Scanned Main + All Iframes)")
 
         # 4. Upload
         driver.execute_script("arguments[0].style.display = 'block';", file_input)
         file_input.send_keys(os.path.abspath(video_path))
         
-        # Wait for file processing (Important for Pi speed)
         time.sleep(5)
         
-        # Reset context
+        # Switch back to main context
         driver.switch_to.default_content()
 
-        # 5. Handle Popups & Wait for Success
-        # We wait for "Edit cover" which appears when video is ready.
-        logger.info("Waiting for upload success (Edit cover)...")
+        # 5. Wait for Success (Using "Edit cover" from your screenshot)
+        logger.info("Waiting for upload processing...")
         
         upload_success = False
-        post_btn = None
-        
-        # Wait up to 120s
-        for _ in range(60):
-            # A. Check for Crash Page (Sad Robot)
-            if len(driver.find_elements(By.XPATH, "//div[contains(text(), 'Something went wrong')]")) > 0:
-                # Try clicking retry
-                _handle_popups_lightweight(driver)
-                time.sleep(2)
-                # If still there, abort
-                if len(driver.find_elements(By.XPATH, "//div[contains(text(), 'Something went wrong')]")) > 0:
-                    raise Exception("TikTok crashed (Something went wrong)")
-
-            # B. Clear Popups (Cookies, Content Check)
-            _handle_popups_lightweight(driver)
+        for _ in range(120): # 2 mins max
+            # Check success triggers
+            success_indicators = [
+                "//div[contains(text(), 'Edit cover')]", # Specific to your case
+                "//div[contains(text(), 'Uploaded')]",
+                "//button[contains(text(), 'Replace')]"
+            ]
             
-            # C. Check Success
-            if len(driver.find_elements(By.XPATH, "//div[contains(text(), 'Edit cover')]")) > 0:
-                upload_success = True
-                logger.info("Upload Verified.")
+            for path in success_indicators:
+                if len(driver.find_elements(By.XPATH, path)) > 0:
+                    upload_success = True
+                    break
+            
+            if upload_success:
+                logger.info("Upload processed.")
                 break
                 
-            time.sleep(2) # 2s sleep to save CPU
+            _handle_popups_safely(driver) # Kill popups while waiting
+            time.sleep(1)
 
         if not upload_success:
             _debug_dump(driver, "upload_timeout")
-            raise Exception("Upload timed out (Video processing stuck)")
+            raise Exception("Upload timed out or blocked by popups")
 
         # 6. Caption
         if description:
             try:
-                # Find editor
-                caption_box = driver.find_element(By.CSS_SELECTOR, ".public-DraftEditor-content")
+                caption_box = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".public-DraftEditor-content"))
+                )
                 driver.execute_script("arguments[0].click();", caption_box)
                 time.sleep(0.5)
                 _inject_text_via_js(driver, caption_box, description)
@@ -347,42 +356,38 @@ def upload(video_path: str, description: str):
 
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
 
-        # 7. Click Post
-        # We assume if "Edit cover" is visible, we are ready to post after handling copyright popup
-        logger.info("Finalizing post...")
-        
-        for _ in range(30):
-            _handle_popups_lightweight(driver) # Kill "Turn on" button
+        # 7. Post Button Logic
+        logger.info("Waiting for Post button...")
+        for _ in range(60):
+            _handle_popups_safely(driver)
             
             try:
-                # Try to find Post button
                 btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Post')]")
                 if btns:
-                    btn = btns[0]
-                    # If enabled, click
-                    if btn.is_enabled():
-                        driver.execute_script("arguments[0].click();", btn)
+                    post_btn = btns[0]
+                    # Check disabled class or attribute
+                    classes = post_btn.get_attribute("class")
+                    if post_btn.is_enabled() and "disabled" not in classes:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", post_btn)
+                        time.sleep(0.5)
+                        try:
+                            post_btn.click()
+                        except:
+                            driver.execute_script("arguments[0].click();", post_btn)
                         break
             except:
                 pass
-            time.sleep(2)
+            time.sleep(1)
 
-        # 8. Verify
-        try:
-            WebDriverWait(driver, 30).until(
-                lambda d: "upload" not in d.current_url or 
-                len(d.find_elements(By.XPATH, "//div[contains(., 'Manage your posts')]")) > 0
-            )
-            set_account_state("tiktok", True, None)
-            logger.info("Upload Successful!")
-            return True, "Upload Successful"
-        except TimeoutException:
-            # If we are still on upload page, assume detection failed but check if button is gone
-            if len(driver.find_elements(By.XPATH, "//button[contains(text(), 'Post')]")) == 0:
-                 return True, "Upload likely success (Post button gone)"
-            else:
-                 _debug_dump(driver, "final_fail")
-                 return False, "Post button clicked but page didn't change"
+        # 8. Final Verification
+        WebDriverWait(driver, 45).until(
+            lambda d: "upload" not in d.current_url or 
+                      len(d.find_elements(By.XPATH, "//div[contains(., 'Manage your posts')]")) > 0
+        )
+        
+        set_account_state("tiktok", True, None)
+        logger.info("Upload Successful!")
+        return True, "Upload Successful"
 
     except Exception as exc:
         err_msg = str(exc).split("\n")[0]
