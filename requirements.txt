@@ -9,3 +9,9 @@ google-auth-httplib2
 google-api-python-client
 requests
 selenium
+streamlit-extras
+streamlit-aggrid
+plotly
+openai
+python-dotenv
+httpx

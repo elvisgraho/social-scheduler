@@ -1,20 +1,1012 @@
-/* Make buttons finger-friendly */
-div.stButton > button {
+/* Professional Theme for Social Scheduler */
+/* Clean, mature design */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+/* Base Variables - Professional Slate Palette */
+:root {
+    --primary: #5a6af0;
+    --primary-dark: #3d4bd6;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --error: #ef4444;
+    --debug: #06b6d4;
+    --bg-dark: #1a1d24;
+    --bg-card: #22262f;
+    --bg-card-hover: #2a2f3a;
+    --bg-input: #1e222b;
+    --text-primary: #e8eaed;
+    --text-secondary: #9aa0a6;
+    --border: #3a3f4a;
+    --border-light: #2d323c;
+    --radius: 8px;
+    --radius-sm: 6px;
+}
+
+/* Global Reset */
+.stApp {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    padding-bottom: 60px !important;
+    overflow-x: hidden !important;
+}
+
+.main .block-container {
+    padding: 0.75rem !important;
+    max-width: 100% !important;
+    width: 100% !important;
+}
+
+/* Header */
+.stTitle {
+    font-size: 1.25rem !important;
+    font-weight: 700;
+    color: var(--text-primary) !important;
+}
+
+.stCaption {
+    color: var(--text-secondary) !important;
+    font-size: 0.8rem !important;
+}
+
+/* Card Components */
+.card, .metric-card {
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    margin-bottom: 0.5rem;
+}
+
+/* Metric Cards */
+.metrics-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.metric-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--border);
+}
+
+.metric-row .metric-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.metric-row .metric-label {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+/* Buttons */
+.stButton > button {
+    border-radius: var(--radius-sm) !important;
+    font-weight: 600 !important;
+    font-size: 0.875rem !important;
+    padding: 0.6rem 1rem !important;
+    min-height: 38px !important;
+    border: 1px solid var(--border) !important;
+    margin-bottom: 0.5rem !important;
+    background: var(--bg-card) !important;
+    color: var(--text-primary) !important;
+    transition: all 0.2s ease !important;
+}
+
+.stButton > button:hover {
+    background: var(--bg-card-hover) !important;
+    border-color: var(--primary) !important;
+}
+
+.stButton > button[type="primary"] {
+    background: var(--primary) !important;
+    border: none !important;
+    color: white !important;
+}
+
+.stButton > button[type="primary"]:hover {
+    background: var(--primary-dark) !important;
+}
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] {
+    display: flex;
+    gap: 0.25rem;
+    background: var(--bg-card);
+    padding: 0.35rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Hide the tab border element that Streamlit adds */
+div[data-baseweb="tab-border"] {
+    display: none !important;
+}
+
+.stTabs [data-baseweb="tab-list"] button {
+    flex: 1;
+    min-width: 60px;
+    border-radius: var(--radius-sm) !important;
+    padding: 0.6rem 0.5rem !important;
+    font-weight: 500 !important;
+    font-size: 0.7rem !important;
+    color: var(--text-secondary) !important;
+    background: transparent !important;
+    border: none !important;
+}
+
+.stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {
+    background: var(--primary) !important;
+    color: white !important;
+}
+
+/* File Uploader */
+.stFileUploader {
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    border: 2px dashed var(--border);
+    padding: 1rem;
+    text-align: center;
+}
+
+/* Expanders */
+.stExpander {
+    background: var(--bg-card);
+    border-radius: var(--radius-sm) !important;
+    border: 1px solid var(--border) !important;
+    margin-bottom: 0.5rem;
+}
+
+.stExpander > div:first-child {
+    padding: 0.75rem !important;
+    font-weight: 600 !important;
+    font-size: 0.9rem !important;
+}
+
+/* INPUT FIELDS */
+.stTextInput > div > div {
+    background: var(--bg-input) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    padding: 0.25rem 0.5rem !important;
+    min-height: 40px !important;
+}
+
+.stTextInput input {
+    background: transparent !important;
+    border: none !important;
+    color: var(--text-primary) !important;
+    font-size: 0.875rem !important;
+    padding: 0 !important;
+}
+
+.stTextInput > div {
+    padding-right: 0px !important;
+}
+
+.stTextArea > div > div {
+    background: var(--bg-input) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    padding: 0.25rem 0.5rem !important;
+}
+
+.stTextArea textarea {
+    background: transparent !important;
+    border: none !important;
+    color: var(--text-primary) !important;
+    font-size: 0.875rem !important;
+    padding: 0 !important;
+    min-height: 80px !important;
+}
+
+/* Selectbox - Inner container styling */
+.stSelectbox div[data-baseweb="select"] {
+    background: var(--bg-input) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    min-height: 36px !important;
+    padding: 0.25rem 0.5rem !important;
+}
+
+/* The value display area */
+.stSelectbox div.st-cl,
+.stSelectbox div.st-co,
+.stSelectbox div.st-cm,
+.stSelectbox div.st-cn {
+    padding: 0.25rem 0.5rem !important;
+    min-height: 28px !important;
+    display: flex !important;
+    align-items: center !important;
+}
+
+/* The selected value text */
+.stSelectbox div.st-gi,
+.stSelectbox div[class*="st-gi"] {
+    color: var(--text-primary) !important;
+    font-size: 0.875rem !important;
+    line-height: 1.2 !important;
+    padding: 0.2rem 0 !important;
+}
+
+/* The input field in select */
+.stSelectbox input {
+    background: transparent !important;
+    border: none !important;
+    color: var(--text-primary) !important;
+    font-size: 0.875rem !important;
+    padding: 0.25rem 0.5rem !important;
+    min-height: 28px !important;
+}
+
+/* Dropdown Menu - Fixed */
+div[role="listbox"],
+[data-baseweb="menu"] {
+    background: var(--bg-dark) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
+}
+
+/* Dropdown Options */
+div[role="option"] {
+    color: var(--text-primary) !important;
+    padding: 0.35rem 0.75rem !important;
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border-light) !important;
+    margin: 2px !important;
+    border-radius: var(--radius-sm) !important;
+    min-height: 32px !important;
+    display: flex !important;
+    align-items: center !important;
+}
+
+div[role="option"]:hover,
+div[role="option"][aria-selected="true"] {
+    background: var(--primary) !important;
+    border-color: var(--primary) !important;
+    color: white !important;
+}
+
+/* Number Input */
+.stNumberInput > div > div {
+    background: var(--bg-input) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    padding: 0.25rem 0.5rem !important;
+}
+
+.stNumberInput input {
+    background: transparent !important;
+    border: none !important;
+    color: var(--text-primary) !important;
+    font-size: 0.875rem !important;
+    padding: 0 !important;
+}
+
+/* Date Input */
+.stDateInput > div > div {
+    background: var(--bg-input) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    padding: 0.25rem 0.5rem !important;
+}
+
+.stDateInput input {
+    background: transparent !important;
+    border: none !important;
+    color: var(--text-primary) !important;
+    font-size: 0.875rem !important;
+    padding: 0 !important;
+}
+
+/* Input Labels */
+.stTextInput label,
+.stTextArea label,
+.stSelectbox label,
+.stNumberInput label,
+.stDateInput label {
+    color: var(--text-secondary) !important;
+    font-size: 0.8rem !important;
+    margin-bottom: 0.25rem !important;
+    display: block !important;
+}
+
+/* Toggle */
+.stToggle {
+    min-height: 38px !important;
+    padding: 0.25rem 0 !important;
+}
+
+.stToggle label {
+    font-size: 0.875rem !important;
+    color: var(--text-primary) !important;
+}
+
+/* Progress Bar - Fixed single bar */
+.stProgress {
+    margin: 0.5rem 0 !important;
+}
+
+/* Hide the first inner div (placeholder container) */
+.stProgress > div:first-child {
+    display: none !important;
+}
+
+/* Target the progress bar inner container */
+.stProgress div[data-baseweb="progress-bar"] {
+    background: transparent !important;
+    height: 6px !important;
+}
+
+/* The actual progress fill */
+.stProgress div[data-baseweb="progress-bar"] > div {
+    background: var(--primary) !important;
+    border-radius: 3px !important;
+    height: 6px !important;
+}
+
+/* Video Preview */
+.video-preview {
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+}
+
+.video-preview video {
+    width: 100% !important;
+    border-radius: var(--radius);
+}
+
+/* Info Messages */
+.stAlert {
+    border-radius: var(--radius-sm) !important;
+    padding: 0.75rem !important;
+    font-size: 0.875rem !important;
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-primary) !important;
+}
+
+.stAlert [data-testid="stIcon"] {
+    color: var(--primary) !important;
+}
+
+.stAlert.stSuccess {
+    border-color: var(--success) !important;
+}
+
+.stAlert.stSuccess [data-testid="stIcon"] {
+    color: var(--success) !important;
+}
+
+.stAlert.stWarning {
+    border-color: var(--warning) !important;
+}
+
+.stAlert.stWarning [data-testid="stIcon"] {
+    color: var(--warning) !important;
+}
+
+.stAlert.stError {
+    border-color: var(--error) !important;
+}
+
+.stAlert.stError [data-testid="stIcon"] {
+    color: var(--error) !important;
+}
+
+/* Divider */
+hr {
+    border-color: var(--border) !important;
+    margin: 0.75rem 0 !important;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    display: none !important;
+}
+
+/* Toast */
+div[data-testid="stToast"] {
+    border-radius: var(--radius-sm) !important;
+    font-size: 0.875rem !important;
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-primary) !important;
+}
+
+/* Code blocks */
+.stCodeBlock {
+    border-radius: var(--radius-sm) !important;
+    font-size: 0.7rem !important;
+    background: var(--bg-input) !important;
+}
+
+/* Download Button */
+.stDownloadButton > button {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-primary) !important;
+}
+
+/* Link Button */
+.stLinkButton > a {
+    border-radius: var(--radius-sm) !important;
+    padding: 0.75rem 1rem !important;
+    min-height: 48px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: var(--primary) !important;
+    color: white !important;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-dark);
+}
+
+/* ============================================
+   MOBILE RESPONSIVE DESIGN
+   ============================================ */
+
+@media (max-width: 768px) {
+    /* Hide header on mobile to save space */
+    .stApp header {
+        display: none !important;
+    }
+    
+    /* Ensure full width */
+    .main .block-container {
+        padding: 0.5rem !important;
+    }
+    
+    /* Force vertical stacking for all columns */
+    div[class*="stColumns"] {
+        flex-direction: column !important;
+        gap: 0.5rem !important;
+    }
+    
+    div[class*="stColumns"] > div {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+    }
+    
+    /* Compact spacing */
+    .stMarkdown {
+        margin-bottom: 0.5rem !important;
+    }
+    
+    h1, h2, h3, h4 {
+        margin-bottom: 0.5rem !important;
+        font-size: 1.1rem !important;
+    }
+    
+    h3 {
+        font-size: 1rem !important;
+    }
+    
+    /* Reduce metrics spacing */
+    [data-testid="stMetric"] {
+        padding: 0.5rem !important;
+        background: var(--bg-card) !important;
+        border-radius: var(--radius-sm) !important;
+        border: 1px solid var(--border) !important;
+    }
+    
+    [data-testid="stMetricValue"] {
+        font-size: 1.25rem !important;
+    }
+    
+    [data-testid="stMetricLabel"] {
+        font-size: 0.75rem !important;
+    }
+    
+    /* Compact buttons */
+    .stButton > button {
+        min-height: 48px !important;
+        padding: 0.75rem 1rem !important;
+        font-size: 0.9rem !important;
+    }
+    
+    /* Compact form inputs */
+    .stTextInput > div > div,
+    .stTextArea > div > div,
+    .stSelectbox div[data-baseweb="select"],
+    .stNumberInput > div > div,
+    .stDateInput > div > div {
+        min-height: 38px !important;
+    }
+    
+    /* Better file uploader on mobile */
+    .stFileUploader {
+        padding: 0.75rem !important;
+    }
+    
+    .stFileUploader button {
+        width: 100% !important;
+    }
+    
+    /* Compact expanders */
+    .stExpander {
+        margin-bottom: 0.35rem !important;
+    }
+    
+    .stExpander > div:first-child {
+        padding: 0.6rem !important;
+        font-size: 0.85rem !important;
+    }
+    
+    /* Scrollable dataframes */
+    .stDataFrame {
+        overflow-x: auto !important;
+        font-size: 0.8rem !important;
+    }
+    
+    /* Prevent horizontal overflow */
+    .stText, .stMarkdown {
+        overflow-wrap: break-word !important;
+        word-wrap: break-word !important;
+    }
+    
+    /* Compact alerts */
+    .stAlert {
+        padding: 0.6rem !important;
+        font-size: 0.8rem !important;
+    }
+    
+    /* Better video player sizing */
+    .stVideo video {
+        max-width: 100% !important;
+        height: auto !important;
+    }
+    
+    /* Form submit buttons full width */
+    .stFormSubmitButton > button {
+        width: 100% !important;
+        margin-top: 0.75rem !important;
+    }
+    
+    /* Compact tabs for small screens */
+    .stTabs [data-baseweb="tab-list"] {
+        padding: 0.25rem !important;
+    }
+    
+    .stTabs [data-baseweb="tab-list"] button {
+        padding: 0.5rem 0.25rem !important;
+        font-size: 0.65rem !important;
+        min-width: 50px !important;
+    }
+    
+    /* Progress bars compact */
+    .stProgress {
+        margin: 0.35rem 0 !important;
+    }
+    
+    /* Prevent text overflow in all elements */
+    * {
+        max-width: 100% !important;
+        overflow-wrap: break-word !important;
+        word-wrap: break-word !important;
+    }
+    
+    /* Platform status containers - full width on mobile */
+    .platform-status {
+        width: 100% !important;
+        min-height: 50px !important;
+        padding: 0.5rem !important;
+    }
+    
+    /* Footer compact */
+    .stCaption {
+        font-size: 0.7rem !important;
+    }
+}
+
+/* Extra small screens */
+@media (max-width: 480px) {
+    .main .block-container {
+        padding: 0.35rem !important;
+    }
+    
+    h1 {
+        font-size: 1.1rem !important;
+    }
+    
+    h2 {
+        font-size: 1rem !important;
+    }
+    
+    h3 {
+        font-size: 0.9rem !important;
+    }
+    
+    [data-testid="stMetricValue"] {
+        font-size: 1.1rem !important;
+    }
+    
+    /* Even smaller tabs */
+    .stTabs [data-baseweb="tab-list"] button {
+        font-size: 0.6rem !important;
+        padding: 0.4rem 0.2rem !important;
+    }
+}
+
+/* Utility Classes */
+.text-center { text-align: center; }
+.mb-1 { margin-bottom: 0.5rem; }
+.mb-2 { margin-bottom: 0.75rem; }
+.p-1 { padding: 0.5rem; }
+.p-2 { padding: 0.75rem; }
+
+/* Form submit buttons */
+.stFormSubmitButton > button {
+    width: 100% !important;
+    margin-top: 0.5rem !important;
+}
+
+/* Multiselect */
+.stMultiSelect > div > div {
+    background: var(--bg-input) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    padding: 0.25rem 0.5rem !important;
+}
+
+/* Metric styling */
+[data-testid="stMetricValue"] {
+    color: var(--text-primary) !important;
+    font-weight: 600 !important;
+}
+
+[data-testid="stMetricLabel"] {
+    color: var(--text-secondary) !important;
+}
+
+/* Platform Status Containers - Uniform */
+.platform-status {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.75rem;
+    text-align: center;
+    min-height: 60px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+
+.platform-status.connected {
+    border-color: var(--success);
+    background: rgba(34, 197, 94, 0.08);
+}
+
+.platform-status.disconnected {
+    border-color: var(--warning);
+    background: rgba(245, 158, 11, 0.08);
+}
+
+.platform-name {
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: var(--text-primary);
+    margin-bottom: 0.25rem;
+}
+
+.platform-state {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.platform-status.connected .platform-state {
+    color: var(--success);
+}
+
+.platform-status.disconnected .platform-state {
+    color: var(--warning);
+}
+
+/* Refresh button container */
+.refresh-btn {
+    margin-top: 0.5rem;
+}
+
+.refresh-btn .stButton > button {
     width: 100%;
-    height: 3em;
-    border-radius: 12px;
-    font-weight: bold;
 }
-/* Optimize spacing for mobile */
-.block-container {
-    padding-top: 1rem;
-    padding-bottom: 2rem;
+
+/* ============================================
+   PROFESSIONAL LOG DISPLAY
+   ============================================ */
+
+/* Log container */
+.log-container {
+    background: var(--bg-input);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    overflow: hidden;
+    margin-bottom: 1rem;
 }
-/* Card look for history items */
-.history-card {
-    background-color: #262730;
-    padding: 15px;
-    border-radius: 10px;
-    margin-bottom: 10px;
-    border: 1px solid #41424b;
+
+/* Log header */
+.log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-card);
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.log-header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.log-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+/* Log content area */
+.log-content {
+    max-height: 400px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    padding: 0.5rem 0;
+}
+
+/* Individual log lines */
+.log-line {
+    display: flex;
+    padding: 0.25rem 0.75rem;
+    border-bottom: 1px solid var(--border-light);
+    transition: background 0.15s ease;
+}
+
+.log-line:hover {
+    background: var(--bg-card-hover);
+}
+
+.log-line:last-child {
+    border-bottom: none;
+}
+
+/* Log timestamp */
+.log-timestamp {
+    color: var(--text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
+    width: 75px;
+    font-size: 0.7rem;
+}
+
+/* Log level-size: 0 indicator */
+.log-level {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-right: 0.5rem;
+    min-width: 50px;
+    flex-shrink: 0;
+}
+
+.log-level.info {
+    background: rgba(90, 106, 240, 0.15);
+    color: var(--primary);
+}
+
+.log-level.success {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--success);
+}
+
+.log-level.warning {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--warning);
+}
+
+.log-level.error {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--error);
+}
+
+.log-level.debug {
+    background: rgba(6, 182, 212, 0.15);
+    color: var(--debug);
+}
+
+/* Log message */
+.log-message {
+    color: var(--text-primary);
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+/* Empty log state */
+.log-empty {
+    padding: 2rem;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+/* Log controls row */
+.log-controls-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    align-items: center;
+}
+
+/* Log filter input */
+.log-filter {
+    flex: 1;
+    min-width: 150px;
+}
+
+/* Log stats */
+.log-stats {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    padding: 0.25rem 0.75rem;
+}
+
+/* Log level filter buttons */
+.log-level-filter {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.log-level-btn {
+    padding: 0.25rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.log-level-btn:hover {
+    border-color: var(--primary);
+    color: var(--text-primary);
+}
+
+.log-level-btn.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+}
+
+/* Mobile log adjustments */
+@media (max-width: 768px) {
+    .log-header {
+        flex-direction: column;
+        gap: 0.5rem;
+        align-items: flex-start;
+    }
+    
+    .log-content {
+        max-height: 300px;
+        font-size: 0.7rem;
+    }
+    
+    .log-timestamp {
+        width: 60px;
+        font-size: 0.65rem;
+    }
+    
+    .log-level {
+        font-size: 0.6rem;
+        padding: 0.1rem 0.3rem;
+        min-width: 40px;
+    }
+    
+    .log-line {
+        padding: 0.2rem 0.5rem;
+    }
+    
+    .log-controls-row {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .log-filter {
+        min-width: 100%;
+    }
+    
+    .log-level-filter {
+        justify-content: center;
+    }
+}
+
+/* Log auto-scroll indicator */
+.log-scroll-hint {
+    position: sticky;
+    bottom: 0;
+    background: var(--bg-card);
+    padding: 0.5rem;
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    border-top: 1px solid var(--border);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.log-scroll-hint.visible {
+    opacity: 1;
+}
+
+/* Log highlight for filtered search */
+.log-highlight {
+    background: rgba(245, 158, 11, 0.3);
+    color: var(--warning);
+    padding: 0 2px;
+    border-radius: 2px;
+}
+
+/* Status indicator dot */
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-dot.live {
+    background: var(--success);
+    animation: pulse 2s infinite;
+}
+
+.status-dot.empty {
+    background: var(--text-secondary);
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
 }

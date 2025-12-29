@@ -1,5 +1,5 @@
 [server]
-maxUploadSize = 4024 # 4GB limit
+maxUploadSize = 4024
 enableCORS = false
 enableXsrfProtection = false
 address = "0.0.0.0"
@@ -7,7 +7,11 @@ port = 8501
 
 [theme]
 base = "dark"
-primaryColor = "#ff4b4b"
+primaryColor = "#6366f1"
+secondaryBackgroundColor = "#1e293b"
+backgroundColor = "#0f172a"
+textColor = "#f8fafc"
+font = "sans-serif"
 
 [browser]
 gatherUsageStats = false
