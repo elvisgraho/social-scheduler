@@ -7,7 +7,6 @@ from instagrapi.exceptions import (
     ChallengeRequired, 
     TwoFactorRequired,
 )
-# Make sure pydantic is installed/available
 from pydantic import ValidationError
 
 from src.logging_utils import init_logging
@@ -121,7 +120,7 @@ def upload(video_path: str, caption: str):
         return client.clip_upload(
             video_path,
             caption=(caption or "")[:2200],
-            extra_data={"share_to_feed": 0},
+            share_to_feed=False
         )
 
     try:
@@ -139,9 +138,6 @@ def upload(video_path: str, caption: str):
     # FIXED: Blindly trust upload success on ValidationError
     except ValidationError as e:
         logger.warning(f"Instagram response parsing failed (Known Library Bug). Ignoring error as upload likely succeeded. Error: {e}")
-        # A ValidationError during upload usually means the HTTP POST finished (Video Uploaded), 
-        # but the library failed to read the JSON response. 
-        # We assume success and DO NOT verify via feed.
         set_account_state("instagram", True, None)
         return True, "Uploaded (Blind success: Parsing error ignored)"
 
@@ -166,10 +162,6 @@ def upload(video_path: str, caption: str):
                 set_account_state("instagram", True, None)
                 return True, f"Uploaded PK: {media.pk} (Retry)"
             
-            # If retry also hits ValidationError, we catch it here manually or let it fail?
-            # Ideally, we let it fall through or wrap retry in its own block. 
-            # For simplicity, if retry fails with ValidationError, it will hit the generic catch below.
-            # To fix that, we must check type here too:
             except ValidationError:
                  logger.warning("Retry upload likely succeeded (Parsing error ignored).")
                  set_account_state("instagram", True, None)
