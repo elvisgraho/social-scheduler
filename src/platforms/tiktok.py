@@ -1,7 +1,7 @@
 import os
+import sys
 import time
 import requests
-import json
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
@@ -15,11 +15,17 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
-    TimeoutException,
-    NoSuchElementException,
-    WebDriverException,
-    ElementClickInterceptedException
+    NoSuchElementException
 )
+
+# 1. Get the absolute path of the folder containing THIS file (tiktok.py)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+# 2. Add this folder to Python's search list if it's not already there
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+from tiktok_selenium_utils import dismiss_shadow_cookies, handle_are_you_sure_exit, handle_continue_to_post, handle_standard_popups
 
 # --- HYBRID IMPORT SYSTEM (Server vs Local) ---
 try:
@@ -169,97 +175,6 @@ def _browser_log(driver, message):
         # In case driver is closed or script fails
         logger.info(message)
 
-def _dismiss_blocking_elements(driver, check_shadow=False) -> bool:
-    """
-    Clears popups. Returns True if something was dismissed.
-    Includes logic for: Exit Modal, Shadow Cookies, and 'Post now' Confirmation.
-    Optimized to minimize CPU usage on Pi.
-    """
-    did_dismiss = False
-
-    # 1. EXIT MODAL HANDLER (High Priority, Fast JS Check)
-    try:
-        dismissed = driver.execute_script("""
-            var h1s = document.getElementsByTagName('h1');
-            for (var i = 0; i < h1s.length; i++) {
-                if (h1s[i].innerText.indexOf('Are you sure you want to exit') !== -1) {
-                    var dialog = h1s[i].closest('div[role="dialog"]');
-                    if (dialog) {
-                        var buttons = dialog.getElementsByTagName('button');
-                        for (var j = 0; j < buttons.length; j++) {
-                            if (buttons[j].innerText.indexOf('Cancel') !== -1) {
-                                buttons[j].click();
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-            return false;
-        """)
-        if dismissed:
-            _browser_log(driver, "Dismissed 'Exit' modal")
-            did_dismiss = True
-            time.sleep(1) # Wait for animation
-    except: pass
-
-    # 2. "CONTINUE TO POST?" MODAL (High Priority, Specific XPath)
-    try:
-        # Only search if we suspect we are at the end
-        post_now_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Post now')]")
-        for btn in post_now_btns:
-            if btn.is_displayed():
-                _browser_log(driver, "Found 'Continue to post?' modal - Clicking 'Post now'")
-                driver.execute_script("arguments[0].click();", btn)
-                did_dismiss = True
-                time.sleep(2) # Allow redirect
-    except: pass
-
-    # 3. SHADOW COOKIES (Heavy JS - Only runs if needed, or periodically)
-    # We rely on the calling loop to not call this excessively
-    if check_shadow:
-        try:
-            driver.execute_script("""
-                function clickShadowCookies(root) {
-                    try {
-                        // Use querySelectorAll which is faster than iterating everything
-                        let buttons = root.querySelectorAll('button');
-                        buttons.forEach(b => {
-                            let txt = b.innerText.toLowerCase();
-                            if (txt.includes('allow all') || txt.includes('decline optional')) {
-                                if (b.offsetParent !== null) b.click();
-                            }
-                        });
-                    } catch(e) {}
-                    try {
-                        // Only traverse open shadow roots
-                        let all = root.querySelectorAll('*');
-                        all.forEach(el => {
-                            if (el.shadowRoot) clickShadowCookies(el.shadowRoot);
-                        });
-                    } catch(e) {}
-                }
-                clickShadowCookies(document);
-            """)
-        except: pass
-
-    # 4. STANDARD POPUPS (Fast XPath)
-    xpath_targets = [
-        "//button[contains(., 'Confirm')]", 
-        "//button[contains(., 'Got it')]",
-    ]
-    for xp in xpath_targets:
-        try:
-            elements = driver.find_elements(By.XPATH, xp)
-            for el in elements:
-                if el.is_displayed():
-                    driver.execute_script("arguments[0].click();", el)
-                    time.sleep(0.5)
-                    did_dismiss = True
-        except: pass
-            
-    return did_dismiss
-
 def _debug_dump(driver, queue_name="error"):
     """Saves screenshot and logs on failure."""
     try:
@@ -352,11 +267,18 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         })
         
         driver.get("https://www.tiktok.com/upload?lang=en")
+
+        time.sleep(2)
         
         # --- 1. INPUT RADAR ---
         _browser_log(driver, "Scanning for file input...")
         file_input = None
         for i in range(30):
+            # Periodically clear popups
+            if i % 3 == 0:
+                handle_standard_popups(driver)
+                dismiss_shadow_cookies(driver)
+
             try:
                 file_input = driver.find_element(By.XPATH, "//input[@type='file']")
                 break
@@ -378,8 +300,6 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                     if not found_in_frame: driver.switch_to.default_content()
             if found_in_frame: break
             
-            # Periodically clear popups
-            if i % 3 == 0: _dismiss_blocking_elements(driver)
             time.sleep(1)
 
         if not file_input:
@@ -399,7 +319,8 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         for i in range(120): # Max 6 minutes
             # Only run heavy JS dismissal every few cycles to save Pi CPU
             if i % 2 == 0: 
-                _dismiss_blocking_elements(driver)
+                handle_are_you_sure_exit(driver, _browser_log)
+                handle_standard_popups(driver)
             
             try:
                 replace_btns = driver.find_elements(By.XPATH, "//button[@aria-label='Replace' or contains(., 'Replace')]")
@@ -424,25 +345,44 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         if description:
             try:
                 _browser_log(driver, "Entering description...")
-                _dismiss_blocking_elements(driver)
+                handle_standard_popups(driver)
                 
                 caption_box = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, ".public-DraftEditor-content"))
                 )
                 
-                # Center scroll to avoid 'Exit' triggers on top/bottom
+                # Center scroll to avoid 'Exit' triggers
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", caption_box)
                 time.sleep(1)
                 
+                # 1. Clear existing text safely
                 actions = ActionChains(driver)
                 actions.move_to_element(caption_box).click().pause(0.5)
                 actions.key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).pause(0.5)
                 actions.send_keys(Keys.BACKSPACE).pause(0.5)
-                actions.send_keys(description)
                 actions.perform()
-                
+
+                # 2. Type description word-by-word to trigger Hashtags
+                # We do NOT use the URL. We type the #tag and hit SPACE to confirm it.
+                parts = description.split(' ')
+                for part in parts:
+                    actions = ActionChains(driver)
+                    
+                    if part.startswith('#'):
+                        # Hashtag logic: Type -> Pause for Menu -> Space to confirm
+                        actions.send_keys(part)
+                        actions.pause(1) # Wait for "Tag" dropdown
+                        actions.send_keys(Keys.SPACE) # Select/Confirm tag
+                    else:
+                        # Normal word logic
+                        actions.send_keys(part + " ")
+                    
+                    actions.perform()
+                    time.sleep(0.1) # Human-like typing speed
+
                 _browser_log(driver, "Description entered. Waiting 3s for save...")
-                time.sleep(3) # Wait for auto-save
+                time.sleep(3) # Critical wait for Auto-Save
+                    
             except Exception as e:
                 logger.warning(f"Caption failed: {e}")
 
@@ -451,7 +391,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         
         for _ in range(30):
             try:
-                if _dismiss_blocking_elements(driver, check_shadow=False):
+                if handle_continue_to_post(driver, _browser_log):
                     time.sleep(1) 
                     continue
 
@@ -469,10 +409,14 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                         time.sleep(1.5) 
                         
                         # Last check for modals before clicking
-                        if _dismiss_blocking_elements(driver, check_shadow=False):
+                        if handle_continue_to_post(driver, _browser_log):
                             _browser_log(driver, "Modal appeared during scroll - dismissed, retrying...")
                             continue
+                        
+                        if IS_LOCAL:
+                            time.sleep(9999)
 
+                        _browser_log(driver, "Clicking Post Button")
                         driver.execute_script("arguments[0].click();", post_btn)
                         _browser_log(driver, "Post button clicked. Moving to verification...")
                         break
@@ -481,7 +425,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
 
         # --- 5. VERIFICATION ---
         _browser_log(driver, "Verifying upload...")
-        
+
         # Loop to catch "Continue to post?" modal or Success
         for _ in range(120): # 60 seconds
             # A. Success Indicators
@@ -494,7 +438,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                 return True, "Upload Successful"
             
             # B. "Post Now" Modal Check
-            if _dismiss_blocking_elements(driver):
+            if handle_continue_to_post(driver, _browser_log):
                 _browser_log(driver, "Handled modal during verification phase.")
                 time.sleep(2)
                 continue

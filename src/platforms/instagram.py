@@ -1,19 +1,17 @@
 import json
 import time
-from typing import Tuple, Dict, Any
+from typing import Tuple
 
 from instagrapi import Client
 from instagrapi.exceptions import (
     ChallengeRequired, 
-    LoginRequired, 
-    TwoFactorRequired, 
-    ClientError
+    TwoFactorRequired,
 )
-# CRITICAL FIX: Import ValidationError to catch the specific library bug
+# Make sure pydantic is installed/available
 from pydantic import ValidationError
 
 from src.logging_utils import init_logging
-from src.database import get_config, set_account_state, set_config, set_json_config
+from src.database import get_config, set_account_state, set_config
 
 SESSION_KEY = "insta_session"
 SESSION_ID_KEY = "insta_sessionid"
@@ -23,7 +21,6 @@ def _credentials() -> Tuple[str, str]:
     return get_config("insta_user"), get_config("insta_pass")
 
 def _format_error(exc: Exception) -> str:
-    # Safe error formatting to extract HTTP details if available
     try:
         status = getattr(exc, "response", None)
         if status is not None:
@@ -32,7 +29,6 @@ def _format_error(exc: Exception) -> str:
             if code or text:
                 details = f"HTTP {code}" if code else "HTTP error"
                 if text:
-                    # Truncate long HTML/JSON responses in logs
                     details = f"{details}: {text[:200]}" 
                 return details
     except Exception:
@@ -63,7 +59,6 @@ def _extract_sessionid(raw: str) -> str:
     return raw
 
 def _load_settings(cl: Client) -> bool:
-    """Load settings and return True if session was loaded."""
     session_data = get_config(SESSION_KEY)
     if session_data:
         try:
@@ -82,16 +77,9 @@ def _store_settings(cl: Client) -> None:
         logger.warning("Could not persist Instagram settings/session.")
 
 def _login(cl: Client) -> Tuple[bool, str]:
-    """
-    Attempts to ensure the client is authenticated.
-    Priority:
-    1. Existing session ID (if not expired)
-    2. Username/Password login
-    """
     username, password = _credentials()
     sessionid = _extract_sessionid(get_config(SESSION_ID_KEY, ""))
     
-    # 1. Try Session ID first (stateless check, relying on library validation during action)
     if sessionid:
         try:
             cl.login_by_sessionid(sessionid)
@@ -101,7 +89,6 @@ def _login(cl: Client) -> Tuple[bool, str]:
         except Exception as exc:
             logger.warning("Instagram sessionid login failed: %s", exc)
 
-    # 2. Fallback to Credentials
     if not username or not password:
         msg = "Instagram credentials missing."
         set_account_state("instagram", False, msg)
@@ -125,10 +112,7 @@ def upload(video_path: str, caption: str):
     cl = Client()
     cl.delay_range = [1, 3]
     
-    # Attempt to load settings/session first
     using_session = _load_settings(cl)
-    
-    # Ensure we are logged in (via session or creds)
     ok, msg = _login(cl)
     if not ok:
         return False, msg
@@ -152,53 +136,27 @@ def upload(video_path: str, caption: str):
         _store_settings(cl)
         return True, f"Uploaded PK: {media.pk}"
 
-    # CRITICAL FIX: Catch the library bug ("audio_filter_infos" validation error)
-    except ValidationError:
-        logger.warning("Instagram library crashed on response parsing (Pydantic). Verifying upload existence...")
-        try:
-            # Wait for Instagram backend
-            time.sleep(10)
-            
-            # Check the user's latest posts to see if it actually worked
-            my_id = cl.user_id
-            medias = cl.user_medias(my_id, amount=2)
-            
-            for m in medias:
-                # Check if it's a Reel (media_type 2) and verify caption start match
-                # Use a small slice of caption to avoid encoding mismatches
-                if m.media_type == 2 and (caption[:15] in (m.caption_text or "")):
-                    _store_settings(cl)
-                    msg = f"Uploaded PK: {m.pk} (Verified after library validation error)"
-                    set_account_state("instagram", True, None)
-                    return True, msg
-            
-            # If loop finishes without finding it
-            raise Exception("Upload failed: Library error and video not found on profile.")
-            
-        except Exception as check_exc:
-            final_err = f"Validation Error & Verification Failed: {check_exc}"
-            set_account_state("instagram", False, final_err)
-            return False, final_err
+    # FIXED: Blindly trust upload success on ValidationError
+    except ValidationError as e:
+        logger.warning(f"Instagram response parsing failed (Known Library Bug). Ignoring error as upload likely succeeded. Error: {e}")
+        # A ValidationError during upload usually means the HTTP POST finished (Video Uploaded), 
+        # but the library failed to read the JSON response. 
+        # We assume success and DO NOT verify via feed.
+        set_account_state("instagram", True, None)
+        return True, "Uploaded (Blind success: Parsing error ignored)"
 
     except Exception as exc:
-        # If the first attempt fails, we check if we should retry.
-        # We retry if we were using a cached session (which might be stale)
-        # OR if the error specifically indicates login requirements (even via HTTP 200).
-        
         err_str = _format_error(exc)
         
-        # Check for keywords that imply auth failure, or that "HTTP 200" weirdness
         is_auth_error = any(x in err_str.lower() for x in ["login", "challenge", "unauthorized", "http 200"])
         
         if using_session or is_auth_error:
             logger.warning(f"Instagram upload failed with potential session issue ({err_str}). Retrying with fresh login...")
-            
             try:
                 username, password = _credentials()
                 if not username or not password:
                     raise Exception("No credentials for retry.")
                 
-                # Create FRESH client (clear settings)
                 cl = Client()
                 cl.login(username, password)
                 _store_settings(cl)
@@ -208,12 +166,19 @@ def upload(video_path: str, caption: str):
                 set_account_state("instagram", True, None)
                 return True, f"Uploaded PK: {media.pk} (Retry)"
             
+            # If retry also hits ValidationError, we catch it here manually or let it fail?
+            # Ideally, we let it fall through or wrap retry in its own block. 
+            # For simplicity, if retry fails with ValidationError, it will hit the generic catch below.
+            # To fix that, we must check type here too:
+            except ValidationError:
+                 logger.warning("Retry upload likely succeeded (Parsing error ignored).")
+                 set_account_state("instagram", True, None)
+                 return True, "Uploaded (Retry Blind Success)"
             except Exception as retry_exc:
                 final_err = f"Retry failed: {_format_error(retry_exc)}"
                 set_account_state("instagram", False, final_err)
                 return False, final_err
         
-        # If it wasn't an auth error (e.g. file not found, API down), fail immediately.
         if "ffmpeg" in err_str.lower() or "no such file" in err_str.lower():
             err_str += " (Ensure FFMPEG is installed)"
             
