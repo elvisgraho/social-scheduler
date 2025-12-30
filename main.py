@@ -39,6 +39,7 @@ from src.database import (
     reschedule_queue_item,
     set_config,
     set_account_state,
+    update_queue_status,
     export_config,
     import_config,
     cleanup_uploaded
@@ -229,6 +230,12 @@ def render_platform_status_row(row_id: int, platform_key: str, label: str, log_v
             # Clear the platform status to allow retry
             cleared = clear_platform_status(row_id, platform_key)
             if cleared:
+                # Get updated logs and set queue status to retry
+                from src.database import get_queue_item
+                row = get_queue_item(row_id)
+                current_logs = _parse_platform_logs(row.get("platform_logs")) if row else {}
+                update_queue_status(row_id, "retry", None, current_logs)
+                
                 # Set force flag for this platform
                 set_config(FORCE_KEY, 1)
                 set_config(FORCE_PLATFORM_KEY, platform_key)
