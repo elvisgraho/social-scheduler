@@ -119,8 +119,7 @@ def upload(video_path: str, caption: str):
     def attempt_upload(client):
         return client.clip_upload(
             video_path,
-            caption=(caption or "")[:2200],
-            share_to_feed=False
+            caption=(caption or "")[:2200]
         )
 
     try:
