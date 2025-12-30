@@ -29,6 +29,7 @@ from src.auth_utils import (
     youtube_connected,
 )
 from src.database import (
+    clear_platform_status,
     delete_from_queue,
     get_config,
     get_queue,
@@ -61,6 +62,8 @@ DATA_DIR = Path("data")
 UPLOAD_DIR = Path("data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_KEY = "youtube_credentials"
+FORCE_KEY = "queue_force_run"
+FORCE_PLATFORM_KEY = "queue_force_platform"
 
 
 # --- UI Components ---
@@ -189,6 +192,55 @@ def render_dashboard_tab(queue_rows, uploaded_count: int):
                 st.rerun()
 
 
+def _parse_platform_logs(log_value) -> dict:
+    """Parse platform_logs from string or dict."""
+    if not log_value:
+        return {}
+    if isinstance(log_value, dict):
+        return log_value
+    if isinstance(log_value, str):
+        try:
+            return json.loads(log_value)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def render_platform_status_row(row_id: int, platform_key: str, label: str, log_value, file_path: str):
+    """Render status and force upload button for a single platform."""
+    logs = _parse_platform_logs(log_value)
+    status_text = logs.get(platform_key, "")
+    
+    # Determine status
+    is_success = "success" in str(status_text).lower() or "uploaded" in str(status_text).lower() or "id:" in str(status_text).lower()
+    is_failed = status_text and not is_success
+    
+    col_status, col_action = st.columns([2, 1])
+    
+    with col_status:
+        if is_success:
+            st.success(f"✓ {label}: Success")
+        elif is_failed:
+            st.error(f"✗ {label}: {status_text[:40]}...")
+        else:
+            st.info(f"○ {label}: Pending")
+    
+    with col_action:
+        # Only show force button if not already successful
+        if not is_success:
+            if st.button(f"Force {label}", key=f"force_{row_id}_{platform_key}"):
+                # Clear the platform status to allow retry
+                cleared = clear_platform_status(row_id, platform_key)
+                if cleared:
+                    # Set force flag for this platform
+                    set_config(FORCE_KEY, 1)
+                    set_config(FORCE_PLATFORM_KEY, platform_key)
+                    st.success(f"Force {label} queued!")
+                    st.rerun()
+                else:
+                    st.error("Failed to clear platform status")
+
+
 def render_queue_tab(queue_rows, uploaded_rows):
     """Render upload queue."""
     
@@ -253,6 +305,8 @@ def render_queue_tab(queue_rows, uploaded_rows):
     st.markdown("### **Queue**")
     
     if queue_rows:
+        platforms = get_platforms()
+        
         for row in queue_rows:
             status_icons = {"pending": "Pending", "processing": "Processing", "uploaded": "Done", "failed": "Failed", "retry": "Retry"}
             icon = status_icons.get(row['status'], row['status'].title())
@@ -266,6 +320,18 @@ def render_queue_tab(queue_rows, uploaded_rows):
                     if row.get("last_error"):
                         st.error(row['last_error'][:50])
                     
+                    # Platform status section
+                    st.markdown("**Platforms:**")
+                    for pkey, pcfg in platforms.items():
+                        render_platform_status_row(
+                            row["id"], 
+                            pkey, 
+                            pcfg["label"], 
+                            row.get("platform_logs"),
+                            row["file_path"]
+                        )
+                    
+                    st.markdown("---")
                     ac1, ac2 = st.columns(2)
                     if ac1.button("Delete", key=f"del_{row['id']}"):
                         delete_from_queue(row["id"])

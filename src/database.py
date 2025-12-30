@@ -459,3 +459,37 @@ def import_config(payload: Dict[str, Any]) -> Tuple[int, int]:
         set_account_state(platform, bool(state.get("connected")), state.get("last_error"))
 
     return len(settings), len(accounts)
+
+
+def clear_platform_status(queue_id: int, platform_key: str) -> bool:
+    """
+    Clear a specific platform's status from platform_logs to allow retry.
+    Returns True if successful, False otherwise.
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT platform_logs FROM queue WHERE id = ?", (queue_id,)).fetchone()
+        if not row:
+            return False
+        
+        logs = {}
+        raw_logs = row["platform_logs"]
+        if raw_logs:
+            try:
+                logs = json.loads(raw_logs) if isinstance(raw_logs, str) else raw_logs
+            except (json.JSONDecodeError, TypeError):
+                logs = {}
+        
+        # Clear the specific platform status
+        if platform_key in logs:
+            del logs[platform_key]
+            
+            conn.execute(
+                "UPDATE queue SET platform_logs = ? WHERE id = ?",
+                (json.dumps(logs), queue_id)
+            )
+            conn.commit()
+            return True
+        return False
+    finally:
+        conn.close()
