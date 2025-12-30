@@ -150,7 +150,8 @@ def save_files_to_queue(
 
 def shuffle_queue(queue_rows: List[Dict[str, Any]]) -> Tuple[int, Optional[datetime]]:
     """
-    Randomly reassign schedule slots for pending/retry items starting from the next available slot.
+    Randomly reassign schedule slots for pending/retry items starting from NOW.
+    This shuffles the order without pushing items further into the future.
     Returns (count_shuffled, first_slot_used).
     """
     pending_items = [row for row in queue_rows if row.get("status") in ("pending", "retry")]
@@ -163,13 +164,14 @@ def shuffle_queue(queue_rows: List[Dict[str, Any]]) -> Tuple[int, Optional[datet
     except pytz.UnknownTimeZoneError:
         tz = pytz.UTC
 
-    anchor = get_schedule_start_time(queue_rows)
+    # Start from NOW, not from the latest scheduled time (which pushes items further)
+    anchor = datetime.now(tz)
     if anchor.tzinfo is None:
         anchor = tz.localize(anchor)
     else:
         anchor = anchor.astimezone(tz)
 
-    # Block dates used by non-pending items
+    # Block dates used by non-pending items (so shuffled items don't land on same day)
     occupied: Set[str] = set()
     for row in queue_rows:
         if row.get("status") not in ("pending", "retry"):
@@ -251,13 +253,13 @@ def extract_tiktok_session(raw_value: str) -> str:
                 if isinstance(cookies, list):
                     for cookie in cookies:
                         if isinstance(cookie, dict) and cookie.get("name") == "sessionid":
-                            return str(cookie.get("value", ""))
+                            return str(cookie.get("value", "")).strip()
             
             # Format: [{"name": "sessionid", ...}]
             if isinstance(data, list):
                 for cookie in data:
                     if isinstance(cookie, dict) and cookie.get("name") == "sessionid":
-                        return str(cookie.get("value", ""))
+                        return str(cookie.get("value", "")).strip()
         except json.JSONDecodeError:
             pass
 
