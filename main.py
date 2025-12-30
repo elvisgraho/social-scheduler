@@ -215,30 +215,29 @@ def render_platform_status_row(row_id: int, platform_key: str, label: str, log_v
     is_success = "success" in str(status_text).lower() or "uploaded" in str(status_text).lower() or "id:" in str(status_text).lower()
     is_failed = status_text and not is_success
     
-    col_status, col_action = st.columns([2, 1])
+    # Show status
+    if is_success:
+        st.success(f"✓ {label}: Success")
+    elif is_failed:
+        st.error(f"✗ {label}: {status_text[:40]}...")
+    else:
+        st.info(f"○ {label}: Pending")
     
-    with col_status:
-        if is_success:
-            st.success(f"✓ {label}: Success")
-        elif is_failed:
-            st.error(f"✗ {label}: {status_text[:40]}...")
-        else:
-            st.info(f"○ {label}: Pending")
-    
-    with col_action:
-        # Only show force button if not already successful
-        if not is_success:
-            if st.button(f"Force {label}", key=f"force_{row_id}_{platform_key}"):
-                # Clear the platform status to allow retry
-                cleared = clear_platform_status(row_id, platform_key)
-                if cleared:
-                    # Set force flag for this platform
-                    set_config(FORCE_KEY, 1)
-                    set_config(FORCE_PLATFORM_KEY, platform_key)
-                    st.success(f"Force {label} queued!")
-                    st.rerun()
-                else:
-                    st.error("Failed to clear platform status")
+    # Force button below status (only if not already successful)
+    if not is_success:
+        if st.button(f"Force {label}", key=f"force_{row_id}_{platform_key}"):
+            # Clear the platform status to allow retry
+            cleared = clear_platform_status(row_id, platform_key)
+            if cleared:
+                # Set force flag for this platform
+                set_config(FORCE_KEY, 1)
+                set_config(FORCE_PLATFORM_KEY, platform_key)
+                logger.info("Manual force upload triggered for queue #%s, platform: %s", row_id, label)
+                st.success(f"Force {label} queued!")
+                st.rerun()
+            else:
+                logger.warning("Failed to clear platform status for queue #%s, platform: %s", row_id, label)
+                st.error("Failed to clear platform status")
 
 
 def render_queue_tab(queue_rows, uploaded_rows):
