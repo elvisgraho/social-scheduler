@@ -1,4 +1,4 @@
-# Re-export all functions from submodules for backward compatibility
+# UI Logic Utilities
 from src.ui_logic.datetime_utils import (
     parse_iso,
     format_datetime_for_ui,
