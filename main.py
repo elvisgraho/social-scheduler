@@ -158,6 +158,16 @@ def render_dashboard_tab(queue_rows, uploaded_count: int):
     pause_toggle = st.toggle("Pause Uploads", value=paused, key="pause_toggle")
     if pause_toggle != paused:
         set_config("queue_paused", int(pause_toggle))
+        
+        if pause_toggle:
+            # Queue was paused
+            logger.info("Queue paused by user")
+        else:
+            # Queue was unpaused - reschedule all pending items to next available slots
+            logger.info("Queue unpaused by user - rescheduling pending items")
+            rescheduled_count, _ = ui_logic.reschedule_pending_items(queue_rows)
+            logger.info("Rescheduled %d pending items after unpause", rescheduled_count)
+        
         st.rerun()
     
     # Schedule - Simple
@@ -426,16 +436,36 @@ def render_accounts_tab():
     st.markdown("### **Instagram**")
     
     with st.expander("Instagram"):
-        st.caption("Paste sessionid cookie")
-        ig_session = st.text_area("Session", height=60, key="ig_session")
-        c1, c2 = st.columns(2)
-        if c1.button("Save", key="ig_save_btn"):
-            ok, msg = instagram_platform.save_sessionid(ig_session)
-            st.success(msg) if ok else st.error(msg)
-            st.rerun()
-        if c2.button("Verify", key="ig_verify_btn"):
-            ok, msg = instagram_platform.verify_login()
-            st.success(msg) if ok else st.error(msg)
+        # Session ID input
+        st.caption("Session ID (from browser cookies)")
+        ig_session = st.text_area("Session ID", value=get_config("insta_sessionid", ""), height=60, key="ig_session")
+        
+        # Username/Password input
+        st.markdown("---")
+        st.caption("Or login with username/password")
+        ig_user = st.text_input("Username", value=get_config("insta_user", ""), key="ig_user")
+        ig_pass = st.text_input("Password", type="password", key="ig_pass")
+        
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("Save Session", key="ig_save_btn"):
+                ok, msg = instagram_platform.save_sessionid(ig_session)
+                st.success(msg) if ok else st.error(msg)
+                st.rerun()
+        with c2:
+            if st.button("Save Credentials", key="ig_creds_btn"):
+                from src.database import set_config
+                set_config("insta_user", ig_user)
+                set_config("insta_pass", ig_pass)
+                if ig_user and ig_pass:
+                    st.success("Credentials saved!")
+                else:
+                    st.info("Credentials cleared.")
+                st.rerun()
+        with c3:
+            if st.button("Verify", key="ig_verify_btn"):
+                ok, msg = instagram_platform.verify_login()
+                st.success(msg) if ok else st.error(msg)
     
     # TikTok
     st.markdown("### **TikTok**")
@@ -451,7 +481,7 @@ def render_accounts_tab():
     
     with st.form("tiktok_form"):
         st.caption("Paste sessionid")
-        tt_input = st.text_area("Session", height=60, key="tt_session")
+        tt_input = st.text_area("Session", value=get_config("tiktok_sessionid", ""), height=60, key="tt_session")
         if st.form_submit_button("Save", key="tt_save_btn", type="primary"):
             raw_input = tt_input.strip()
             if "%" in raw_input:
@@ -520,8 +550,8 @@ def render_settings_tab():
     # Telegram
     st.markdown("### **Telegram**")
     with st.form("telegram_form"):
-        bot_token = st.text_input("Bot Token", type="password")
-        chat_id = st.text_input("Chat ID")
+        bot_token = st.text_input("Bot Token", value=get_config("telegram_bot_token", ""), type="password")
+        chat_id = st.text_input("Chat ID", value=get_config("telegram_chat_id", ""))
         if st.form_submit_button("Save", key="telegram_save_btn"):
             set_config("telegram_bot_token", bot_token)
             set_config("telegram_chat_id", chat_id)
