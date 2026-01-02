@@ -122,13 +122,10 @@ def render_accounts_tab(logger):
     
     if tt_status["valid"]:
         st.success(f"@{tt_status.get('account_name', 'user')}")
-        logger.info("TikTok connected: @%s", tt_status.get('account_name', 'user'))
     elif tt_status["sessionid"]:
         st.error(tt_status.get('message', 'Invalid'))
-        logger.warning("TikTok session invalid: %s", tt_status.get('message', 'Invalid'))
     else:
         st.warning("No session")
-        logger.debug("TikTok: no session configured")
     
     with st.form("tiktok_form"):
         st.caption("Paste sessionid")
