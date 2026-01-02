@@ -167,7 +167,7 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
     queue_id = video["id"]
     file_path = video["file_path"]
     forced_platforms = set(forced_platforms or [])
-    
+
     paused = bool(int(get_config(PAUSE_KEY, 0) or 0))
     if paused:
         logger.info("Queue is paused. Skipping processing for #%s.", queue_id)
@@ -184,43 +184,99 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
     elif isinstance(raw_logs, dict):
         previous_logs = raw_logs
 
-    # 2. Increment attempts immediately
+    # 2. Parse enabled platforms for this specific video (if set)
+    enabled_platforms_for_video = None
+    raw_enabled = video.get("enabled_platforms")
+    if raw_enabled:
+        try:
+            if isinstance(raw_enabled, str):
+                enabled_platforms_for_video = set(json.loads(raw_enabled))
+            elif isinstance(raw_enabled, list):
+                enabled_platforms_for_video = set(raw_enabled)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to parse enabled_platforms for queue #%s", queue_id)
+
+    # 3. Increment attempts immediately
     previous_attempts = video.get("attempts", 0) or 0
     attempts = previous_attempts + 1
     increment_attempts(queue_id)
-    
+
     # Update status to processing so other workers don't grab it (if you scale later)
     update_queue_status(queue_id, "processing", None, previous_logs)
 
-    # 3. File Integrity Check
+    # 4. File Integrity Check
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
         msg = f"File missing or empty for queue #{queue_id}: {file_path}"
         update_queue_status(queue_id, "failed", msg, {"error": msg})
         _notify(msg)
         return
 
-    title = video.get("title") or get_config("global_title", "Short")
-    description = video.get("description") or get_config("global_desc", "")
+    # Get base title and description
+    base_title = video.get("title") or get_config("global_title", "Short")
+    base_description = video.get("description") or get_config("global_desc", "")
+
+    # Parse platform-specific overrides from video (if any)
+    video_platform_overrides = {}
+    raw_overrides = video.get("platform_overrides")
+    if raw_overrides:
+        try:
+            if isinstance(raw_overrides, str):
+                video_platform_overrides = json.loads(raw_overrides)
+            elif isinstance(raw_overrides, dict):
+                video_platform_overrides = raw_overrides
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to parse platform_overrides for queue #%s", queue_id)
 
     current_logs = previous_logs.copy()
     failures = []
+    successes = []
     missing_accounts = []
     platforms = get_platforms()
     platform_items = list(platforms.items())
-    if _platform_shuffle_enabled():
+
+    # Check if staged uploads are enabled
+    staged_uploads_enabled = bool(int(get_config("staged_uploads_enabled", "0") or "0"))
+    test_platform_key = get_config("staged_upload_test_platform", "youtube")
+
+    # If staged uploads enabled, upload to test platform first
+    if staged_uploads_enabled and test_platform_key in platforms:
+        # Reorder: test platform first, then others
+        test_platform_items = [(k, v) for k, v in platform_items if k == test_platform_key]
+        other_platform_items = [(k, v) for k, v in platform_items if k != test_platform_key]
+
+        if _platform_shuffle_enabled():
+            random.shuffle(other_platform_items)
+
+        platform_items = test_platform_items + other_platform_items
+        logger.info("Staged uploads enabled: testing with %s first", test_platform_key)
+    elif _platform_shuffle_enabled():
         random.shuffle(platform_items)
 
-    # 4. Process Platforms
-    for key, cfg in platform_items:
+    # 5. Process Platforms
+    staged_test_failed = False
+    for idx, (key, cfg) in enumerate(platform_items):
+        # If staged uploads and test platform failed, skip remaining platforms
+        if staged_uploads_enabled and staged_test_failed and idx > 0:
+            logger.info("Skipping %s for #%s (staged test platform failed)", cfg["label"], queue_id)
+            current_logs[key] = "Skipped due to test platform failure"
+            continue
+
+        # Skip if forced platforms set and this platform not in forced list
         if forced_platforms and key not in forced_platforms:
             continue
 
+        # Skip if this video has specific platforms enabled and this platform is not in the list
+        if enabled_platforms_for_video is not None and key not in enabled_platforms_for_video:
+            logger.info("Skipping %s for #%s (not enabled for this video).", cfg["label"], queue_id)
+            continue
+
         label = cfg["label"]
-        
+
         # SKIP if already succeeded in a previous attempt
         prev_status = current_logs.get(key, "")
         if "success" in str(prev_status).lower() or "uploaded id" in str(prev_status).lower():
             logger.info("Skipping %s for #%s (already uploaded).", label, queue_id)
+            successes.append(label)
             continue
 
         if not cfg["connected"]():
@@ -233,38 +289,117 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
         if not preflight_ok:
             failure = f"{label} failed: {preflight_msg}"
             current_logs[key] = preflight_msg
-            failures.append(failure)
+            failures.append((label, preflight_msg))
             logger.error(failure)
+            # CONTINUE to other platforms instead of stopping
             continue
 
         # Add Jitter (wait 10-30 seconds between platforms to avoid bot detection)
         time.sleep(random.uniform(10, 30))
 
+        # Get platform-specific title/description
+        # Priority: video-specific override > global platform override > base title/description
+        platform_title = base_title
+        platform_description = base_description
+
+        # Check video-specific overrides first
+        if key in video_platform_overrides:
+            overrides = video_platform_overrides[key]
+            if "title" in overrides and overrides["title"]:
+                platform_title = overrides["title"]
+            if "description" in overrides and overrides["description"]:
+                platform_description = overrides["description"]
+        else:
+            # Fall back to global platform overrides from settings
+            if key == "youtube":
+                yt_title_override = get_config("youtube_title_override", "")
+                yt_desc_override = get_config("youtube_desc_override", "")
+                if yt_title_override:
+                    platform_title = yt_title_override
+                if yt_desc_override:
+                    platform_description = yt_desc_override
+            elif key == "instagram":
+                ig_desc_override = get_config("instagram_desc_override", "")
+                if ig_desc_override:
+                    platform_description = ig_desc_override
+            elif key == "tiktok":
+                tt_desc_override = get_config("tiktok_desc_override", "")
+                if tt_desc_override:
+                    platform_description = tt_desc_override
+
         uploader = cfg["uploader"]
         try:
             if key == "youtube":
-                ok, message = uploader(file_path, title, description)
+                ok, message = uploader(file_path, platform_title, platform_description)
             else:
-                ok, message = uploader(file_path, description)
+                ok, message = uploader(file_path, platform_description)
         except Exception as e:
             ok = False
             message = str(e)
 
         current_logs[key] = message
-        
+
         if ok:
             logger.info("%s upload success for queue #%s: %s", label, queue_id, message)
+            successes.append(label)
         else:
             failure = f"{label} failed: {message}"
-            failures.append(failure)
+            failures.append((label, message))
             logger.error(failure)
 
-    # 5. Determine Final Status
-    if failures or missing_accounts:
-        # Consolidate error messages
+            # If this is the test platform in staged mode, mark as failed
+            if staged_uploads_enabled and idx == 0 and key == test_platform_key:
+                staged_test_failed = True
+                logger.warning("Test platform %s failed in staged mode, skipping remaining platforms", label)
+
+            # CONTINUE to other platforms instead of stopping (unless staged test failed)
+
+    # 6. Determine Final Status
+    # Count total platforms that should have been attempted
+    total_platforms_to_try = 0
+    for key, cfg in platforms.items():
+        if enabled_platforms_for_video is not None and key not in enabled_platforms_for_video:
+            continue
+        if cfg["connected"]():
+            total_platforms_to_try += 1
+
+    # Calculate pending queue count
+    pending_count = len([r for r in get_queue(limit=500) if r.get("status") in ("pending", "retry")])
+
+    # Determine if this upload should be considered successful
+    has_any_success = len(successes) > 0
+    all_platforms_succeeded = (len(successes) == total_platforms_to_try and len(failures) == 0)
+
+    if all_platforms_succeeded:
+        # Complete success
+        archive_uploaded_item(video, current_logs)
+        platform_list = ", ".join(successes)
+        _notify(
+            f"Queue #{queue_id} uploaded successfully to: {platform_list}\n"
+            f"Remaining in queue: {pending_count}"
+        )
+    elif has_any_success and len(failures) > 0:
+        # Partial success - some platforms succeeded, some failed
+        archive_uploaded_item(video, current_logs)
+        success_list = ", ".join(successes)
+        failure_list = ", ".join([f"{label} ({msg[:30]}...)" for label, msg in failures])
+
+        # Pause queue on partial failure to allow user to investigate
+        set_config(PAUSE_KEY, 1)
+
+        logger.warning("Partial upload for #%s. Success: %s. Failures: %s", queue_id, success_list, failure_list)
+        _notify(
+            f"Queue #{queue_id} partially uploaded\n"
+            f"✓ Success: {success_list}\n"
+            f"✗ Failed: {failure_list}\n"
+            f"Queue paused. Remaining: {pending_count}"
+        )
+    else:
+        # Complete failure - no platforms succeeded
         parts = []
         if failures:
-            parts.append("; ".join(failures))
+            failure_messages = [f"{label}: {msg}" for label, msg in failures]
+            parts.append("; ".join(failure_messages))
         if missing_accounts:
             parts.append(f"Awaiting account connections: {', '.join(missing_accounts)}")
         error_msg = "; ".join(parts) if parts else "Awaiting account connections."
@@ -279,12 +414,13 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
             logger.error("failure_detail=%s", _json.dumps({"queue_id": queue_id, "failures": failures, "missing": missing_accounts}))
         except Exception:
             pass
-        _notify(f"Queue paused after failure on #{queue_id}: {error_msg}")
-        return
 
-    # Success
-    archive_uploaded_item(video, current_logs)
-    _notify(f"Queue #{queue_id} uploaded to all connected platforms.")
+        failure_summary = ", ".join([label for label, _ in failures])
+        _notify(
+            f"Queue #{queue_id} upload failed on all platforms\n"
+            f"Failed: {failure_summary}\n"
+            f"Queue paused. Remaining: {pending_count}"
+        )
 
 
 def check_and_post():

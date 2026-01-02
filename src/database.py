@@ -79,6 +79,8 @@ def _ensure_queue_columns(conn: sqlite3.Connection) -> None:
         "attempts": "ALTER TABLE queue ADD COLUMN attempts INTEGER DEFAULT 0",
         "last_error": "ALTER TABLE queue ADD COLUMN last_error TEXT",
         "platform_logs": "ALTER TABLE queue ADD COLUMN platform_logs TEXT",
+        "enabled_platforms": "ALTER TABLE queue ADD COLUMN enabled_platforms TEXT",
+        "platform_overrides": "ALTER TABLE queue ADD COLUMN platform_overrides TEXT",
     }
     for column, ddl in columns.items():
         if column not in existing:
@@ -175,15 +177,17 @@ def add_to_queue(
     scheduled_for: Optional[str],
     title: Optional[str],
     description: Optional[str],
+    enabled_platforms: Optional[str] = None,
+    platform_overrides: Optional[str] = None,
 ) -> int:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO queue (file_path, scheduled_for, title, description)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO queue (file_path, scheduled_for, title, description, enabled_platforms, platform_overrides)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (file_path, scheduled_for, title, description),
+        (file_path, scheduled_for, title, description, enabled_platforms, platform_overrides),
     )
     conn.commit()
     vid = cur.lastrowid
@@ -199,8 +203,8 @@ def add_many_to_queue(entries: Iterable[Dict[str, Any]]) -> List[int]:
     cur = conn.cursor()
     cur.executemany(
         """
-        INSERT INTO queue (file_path, scheduled_for, title, description)
-        VALUES (:file_path, :scheduled_for, :title, :description)
+        INSERT INTO queue (file_path, scheduled_for, title, description, enabled_platforms, platform_overrides)
+        VALUES (:file_path, :scheduled_for, :title, :description, :enabled_platforms, :platform_overrides)
         """,
         payload,
     )

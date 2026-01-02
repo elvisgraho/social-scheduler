@@ -39,14 +39,69 @@ def render_settings_tab(logger):
     # Metadata
     st.markdown("### **Defaults**")
     with st.form("meta_form"):
-        title = st.text_input("Title", value=get_config("global_title", "Daily Short #{num}"))
-        desc = st.text_area("Caption/Hashtags", value=get_config("global_desc", "#shorts #viral"), height=60)
+        title = st.text_input("Global Title (YouTube)", value=get_config("global_title", "Daily Short #{num}"))
+        desc = st.text_area("Global Description (All Platforms)", value=get_config("global_desc", "#shorts #viral"), height=60)
+
+        st.markdown("---")
+        st.markdown("**Platform-Specific Overrides** (Optional - leave blank to use global)")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**YouTube**")
+            yt_title = st.text_input("YouTube Title Override", value=get_config("youtube_title_override", ""), max_chars=100, key="yt_title")
+            yt_desc = st.text_area("YouTube Description Override", value=get_config("youtube_desc_override", ""), height=60, key="yt_desc")
+
+        with col2:
+            st.markdown("**Instagram**")
+            ig_desc = st.text_area("Instagram Caption Override", value=get_config("instagram_desc_override", ""), height=60, key="ig_desc", max_chars=2200)
+
+        st.markdown("**TikTok**")
+        tt_desc = st.text_area("TikTok Description Override", value=get_config("tiktok_desc_override", ""), height=60, key="tt_desc")
+
         if st.form_submit_button("Save", key="meta_save_btn"):
             set_config("global_title", title)
             set_config("global_desc", desc)
+
+            # Platform overrides
+            set_config("youtube_title_override", yt_title)
+            set_config("youtube_desc_override", yt_desc)
+            set_config("instagram_desc_override", ig_desc)
+            set_config("tiktok_desc_override", tt_desc)
+
             logger.info("Default metadata saved: title='%s', desc='%s...'", title, desc[:50])
             st.success("Saved!")
     
+    # Upload Strategy
+    st.markdown("### **Upload Strategy**")
+    with st.form("upload_strategy_form"):
+        staged_upload = st.checkbox(
+            "Enable Staged Uploads",
+            value=bool(int(get_config("staged_uploads_enabled", "0") or "0")),
+            help="Upload to one platform first to test, then continue to others if successful"
+        )
+
+        if staged_upload:
+            stage_platform_options = {
+                "youtube": "YouTube (Recommended - fastest feedback)",
+                "instagram": "Instagram",
+                "tiktok": "TikTok"
+            }
+            current_stage = get_config("staged_upload_test_platform", "youtube")
+            stage_platform = st.selectbox(
+                "Test Platform (upload here first)",
+                options=list(stage_platform_options.keys()),
+                format_func=lambda x: stage_platform_options[x],
+                index=list(stage_platform_options.keys()).index(current_stage) if current_stage in stage_platform_options else 0
+            )
+        else:
+            stage_platform = "youtube"
+
+        if st.form_submit_button("Save", key="upload_strategy_save_btn"):
+            set_config("staged_uploads_enabled", "1" if staged_upload else "0")
+            set_config("staged_upload_test_platform", stage_platform)
+            logger.info("Upload strategy saved: staged=%s, test_platform=%s", staged_upload, stage_platform)
+            st.success("Saved!")
+
     # Telegram
     st.markdown("### **Telegram**")
     with st.form("telegram_form"):

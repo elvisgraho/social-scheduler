@@ -14,9 +14,9 @@ logger = logging.getLogger("ui_logic")
 
 
 def save_files_to_queue(
-    files: List[Any], 
-    slots: List[datetime], 
-    upload_dir: Path, 
+    files: List[Any],
+    slots: List[datetime],
+    upload_dir: Path,
     shuffle_order: bool = False
 ) -> int:
     """
@@ -24,23 +24,23 @@ def save_files_to_queue(
     Returns the count of successfully queued items.
     """
     import random
-    
+
     if not files or not slots:
         return 0
 
     title = get_config("global_title", "Daily Short")
     desc = get_config("global_desc", "#shorts")
-    
+
     # Zip stops at the shortest list, preventing index errors
     paired = list(zip(files, slots))
-    
+
     if shuffle_order:
         random.shuffle(paired)
 
     success_count = 0
     base_timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
     sequence = 1
-    
+
     for uploaded_file, slot in paired:
         ext = Path(uploaded_file.name).suffix or ".mp4"
         destination = upload_dir / f"{base_timestamp}_{sequence:02d}{ext}"
@@ -50,16 +50,16 @@ def save_files_to_queue(
             sequence += 1
             destination = upload_dir / f"{base_timestamp}_{sequence:02d}{ext}"
         sequence += 1
-        
+
         try:
             with destination.open("wb") as f:
                 f.write(uploaded_file.getbuffer())
-            
-            # Add to DB
-            add_to_queue(str(destination), slot.isoformat(), title, desc)
+
+            # Add to DB - None for enabled_platforms means all platforms enabled
+            add_to_queue(str(destination), slot.isoformat(), title, desc, enabled_platforms=None)
             logger.info("Queued file %s for %s", destination.name, slot.isoformat())
             success_count += 1
-            
+
         except Exception as e:
             logger.error("Failed to save or queue file %s: %s", uploaded_file.name, e)
             # Cleanup orphan file if DB insert failed
@@ -70,6 +70,58 @@ def save_files_to_queue(
                     pass
 
     return success_count
+
+
+def save_custom_video_to_queue(
+    uploaded_file: Any,
+    scheduled_datetime: datetime,
+    upload_dir: Path,
+    title: str,
+    description: str,
+    enabled_platforms: List[str]
+) -> int:
+    """
+    Saves a single video with custom scheduling, title, description, and platform selection.
+    Returns 1 if successful, 0 otherwise.
+    """
+    base_timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+    ext = Path(uploaded_file.name).suffix or ".mp4"
+    destination = upload_dir / f"{base_timestamp}_custom{ext}"
+
+    # Ensure uniqueness
+    sequence = 1
+    while destination.exists():
+        destination = upload_dir / f"{base_timestamp}_custom_{sequence:02d}{ext}"
+        sequence += 1
+
+    try:
+        with destination.open("wb") as f:
+            f.write(uploaded_file.getbuffer())
+
+        # Convert enabled_platforms list to JSON string
+        platforms_json = json.dumps(enabled_platforms) if enabled_platforms else None
+
+        # Add to DB with custom settings
+        add_to_queue(
+            str(destination),
+            scheduled_datetime.isoformat(),
+            title,
+            description,
+            enabled_platforms=platforms_json
+        )
+        logger.info("Queued custom video %s for %s with platforms: %s",
+                   destination.name, scheduled_datetime.isoformat(), enabled_platforms)
+        return 1
+
+    except Exception as e:
+        logger.error("Failed to save or queue custom video %s: %s", uploaded_file.name, e)
+        # Cleanup orphan file if DB insert failed
+        if destination.exists():
+            try:
+                destination.unlink()
+            except OSError:
+                pass
+        return 0
 
 
 def extract_tiktok_session(raw_value: str) -> str:

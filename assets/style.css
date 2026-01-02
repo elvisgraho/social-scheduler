@@ -1010,3 +1010,132 @@ div[data-testid="stToast"] {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
 }
+
+/* ============================================
+   IPHONE SPECIFIC OPTIMIZATIONS
+   ============================================ */
+
+/* Larger touch targets for buttons on iPhone */
+@media (max-width: 768px) {
+    /* Make all buttons larger and more finger-friendly */
+    .stButton > button {
+        min-height: 50px !important;
+        font-size: 0.95rem !important;
+        padding: 0.85rem 1.25rem !important;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    /* Larger checkbox and radio buttons */
+    .stCheckbox, .stRadio {
+        min-height: 48px !important;
+        padding: 0.75rem 0 !important;
+    }
+
+    .stCheckbox label, .stRadio label {
+        font-size: 0.95rem !important;
+        padding: 0.5rem 0 !important;
+    }
+
+    /* Larger text inputs for easier tapping */
+    .stTextInput > div > div,
+    .stTextArea > div > div,
+    .stSelectbox div[data-baseweb="select"],
+    .stNumberInput > div > div,
+    .stDateInput > div > div,
+    .stTimeInput > div > div {
+        min-height: 48px !important;
+        padding: 0.65rem 0.85rem !important;
+    }
+
+    /* Larger expander headers for easy tapping */
+    .stExpander > div:first-child {
+        padding: 1rem !important;
+        font-size: 0.95rem !important;
+        min-height: 52px !important;
+        display: flex;
+        align-items: center;
+    }
+
+    /* Better spacing between interactive elements */
+    .stButton, .stCheckbox, .stRadio, .stTextInput, .stTextArea, .stSelectbox {
+        margin-bottom: 0.85rem !important;
+    }
+
+    /* Platform status buttons larger */
+    .platform-status {
+        min-height: 70px !important;
+        padding: 1rem !important;
+    }
+
+    /* Tab buttons larger for easier selection */
+    .stTabs [data-baseweb="tab-list"] button {
+        padding: 0.75rem 0.4rem !important;
+        font-size: 0.75rem !important;
+        min-width: 65px !important;
+        min-height: 44px !important;
+    }
+
+    /* File uploader larger drop zone */
+    .stFileUploader {
+        padding: 1.5rem 1rem !important;
+        min-height: 120px !important;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    /* Form submit buttons extra large */
+    .stFormSubmitButton > button {
+        min-height: 54px !important;
+        font-size: 1rem !important;
+        font-weight: 600 !important;
+    }
+
+    /* Prevent accidental zoom on input focus (iOS specific) */
+    input, textarea, select {
+        font-size: 16px !important;
+    }
+
+    /* Better spacing for queue items */
+    .stExpander {
+        margin-bottom: 0.75rem !important;
+    }
+
+    /* Larger delete/action buttons in queue */
+    .stExpander .stButton > button {
+        min-height: 46px !important;
+    }
+}
+
+/* iPhone SE and smaller */
+@media (max-width: 375px) {
+    .stButton > button {
+        min-height: 48px !important;
+        padding: 0.75rem 1rem !important;
+    }
+
+    .stTabs [data-baseweb="tab-list"] button {
+        min-width: 55px !important;
+        font-size: 0.7rem !important;
+    }
+}
+
+/* Prevent text selection on double-tap (better UX on touch devices) */
+@media (hover: none) and (pointer: coarse) {
+    .stButton > button,
+    .stTabs [data-baseweb="tab-list"] button,
+    .stExpander > div:first-child {
+        -webkit-user-select: none;
+        user-select: none;
+    }
+}
+
+/* Smooth scrolling for iOS */
+@supports (-webkit-overflow-scrolling: touch) {
+    .log-content,
+    .stDataFrame,
+    body {
+        -webkit-overflow-scrolling: touch;
+    }
+}
