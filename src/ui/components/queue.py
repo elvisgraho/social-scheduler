@@ -82,7 +82,7 @@ def render_calendar_view(queue_rows):
     calendar_html += '</div>'
 
     # Render the calendar
-    st.markdown(calendar_html, unsafe_allow_html=True)
+    st.html(calendar_html)
 
     # Show gap summary
     gaps = []
@@ -102,7 +102,7 @@ def render_calendar_view(queue_rows):
             <div class="calendar-gap-warning-text">{', '.join(gaps[:5])}</div>
         </div>
         '''
-        st.markdown(gap_warning_html, unsafe_allow_html=True)
+        st.html(gap_warning_html)
         if len(gaps) > 5:
             st.caption(f"... and {len(gaps) - 5} more")
 
