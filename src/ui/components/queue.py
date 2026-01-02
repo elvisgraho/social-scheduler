@@ -47,37 +47,42 @@ def render_calendar_view(queue_rows):
 
     st.markdown("**Next 14 Days**")
 
-    cols_per_row = 7
-    days_to_show = []
+    # Build calendar HTML using CSS Grid
+    calendar_html = '<div class="calendar-grid">'
 
     for i in range(num_days):
         day = today + timedelta(days=i)
-        days_to_show.append(day)
+        date_key = day.isoformat()
+        is_scheduled_day = day.weekday() in enabled_weekdays
+        has_upload = date_key in scheduled_dates
+        is_today = day == today
 
-    # Render in rows of 7
-    for row_start in range(0, num_days, cols_per_row):
-        cols = st.columns(cols_per_row)
-        for col_idx, day in enumerate(days_to_show[row_start:row_start + cols_per_row]):
-            with cols[col_idx]:
-                date_key = day.isoformat()
-                is_scheduled_day = day.weekday() in enabled_weekdays
-                has_upload = date_key in scheduled_dates
-                is_today = day == today
+        # Determine CSS class
+        if has_upload:
+            day_class = "calendar-day has-upload"
+            count = len(scheduled_dates[date_key])
+            content = f"✓ {count} video{'s' if count > 1 else ''}"
+        elif is_scheduled_day:
+            day_class = "calendar-day gap-day"
+            content = "⚠ No upload"
+        else:
+            day_class = "calendar-day no-schedule"
+            content = "—"
 
-                # Determine styling
-                if is_today:
-                    st.markdown(f"**{day.strftime('%a %d')}**")
-                else:
-                    st.markdown(f"{day.strftime('%a %d')}")
+        # Header styling
+        header_class = "calendar-day-header today" if is_today else "calendar-day-header"
 
-                if has_upload:
-                    count = len(scheduled_dates[date_key])
-                    st.success(f"✓ {count} video{'s' if count > 1 else ''}")
-                elif is_scheduled_day:
-                    # Gap detected!
-                    st.warning("⚠ No upload")
-                else:
-                    st.info("—")
+        calendar_html += f'''
+        <div class="{day_class}">
+            <div class="{header_class}">{day.strftime('%a %d')}</div>
+            <div class="calendar-day-content">{content}</div>
+        </div>
+        '''
+
+    calendar_html += '</div>'
+
+    # Render the calendar
+    st.markdown(calendar_html, unsafe_allow_html=True)
 
     # Show gap summary
     gaps = []
@@ -91,7 +96,13 @@ def render_calendar_view(queue_rows):
             gaps.append(day.strftime("%a, %b %d"))
 
     if gaps:
-        st.warning(f"**Gaps detected:** {', '.join(gaps[:5])}")
+        gap_warning_html = f'''
+        <div class="calendar-gap-warning">
+            <div class="calendar-gap-warning-title">⚠ Gaps Detected</div>
+            <div class="calendar-gap-warning-text">{', '.join(gaps[:5])}</div>
+        </div>
+        '''
+        st.markdown(gap_warning_html, unsafe_allow_html=True)
         if len(gaps) > 5:
             st.caption(f"... and {len(gaps) - 5} more")
 

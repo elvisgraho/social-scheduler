@@ -19,15 +19,15 @@ def dismiss_shadow_cookies(driver):
                     buttons.forEach(b => {
                         // Use textContent as fallback if innerText is empty (hidden elements)
                         let txt = (b.innerText || b.textContent || "").toLowerCase().trim();
-                        
+
                         // Check for common keywords
-                        if (txt.includes('allow all') || 
-                            txt.includes('accept all') || 
-                            txt.includes('accept cookies') || 
-                            txt.includes('agree') || 
-                            txt.includes('decline optional') || 
+                        if (txt.includes('allow all') ||
+                            txt.includes('accept all') ||
+                            txt.includes('accept cookies') ||
+                            txt.includes('agree') ||
+                            txt.includes('decline optional') ||
                             txt.includes('reject optional')) {
-                            
+
                             // Check visibility: offsetParent is the standard check for 'is reachable'
                             // We do NOT check offsetWidth/Height as it fails on animating elements
                             if (b.offsetParent !== null) {
@@ -97,6 +97,7 @@ def handle_standard_popups(driver) -> bool:
 def handle_continue_to_post(driver, logFunction) -> bool:
     """
     Optimized: Single JS call to check, log (via return), and click.
+    Fixed: Added race condition check to ensure element still exists before clicking.
     """
     try:
         # Returns string "clicked" if successful, else null
@@ -104,9 +105,15 @@ def handle_continue_to_post(driver, logFunction) -> bool:
             var btns = document.evaluate("//button[contains(., 'Post now')]", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
             for (var i = 0; i < btns.snapshotLength; i++) {
                 var btn = btns.snapshotItem(i);
-                if (btn.offsetParent !== null) {
-                    btn.click();
-                    return "clicked";
+                // Enhanced visibility check with race condition protection
+                if (btn && btn.isConnected && btn.offsetParent !== null) {
+                    try {
+                        btn.click();
+                        return "clicked";
+                    } catch(e) {
+                        // Element was removed during click attempt
+                        console.error('Click failed:', e);
+                    }
                 }
             }
             return null;

@@ -1,8 +1,10 @@
 import os
 import sys
 import time
+import mimetypes
 import requests
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 # Selenium Imports
@@ -61,6 +63,15 @@ VERIFICATION_INTERVAL_HOURS = 6
 REFRESH_WARNING_DAYS = 25
 # Standard User Agent (Identical to Desktop to avoid detection)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+
+# Upload timeout constants (in iterations)
+FILE_INPUT_SEARCH_TIMEOUT = 30  # 30 seconds
+UPLOAD_COMPLETE_TIMEOUT = 120   # 6 minutes (120 * 3s)
+POST_BUTTON_TIMEOUT = 30        # 60 seconds
+VERIFICATION_TIMEOUT = 120      # 60 seconds
+
+# Supported video formats
+SUPPORTED_VIDEO_FORMATS = {'.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv', '.wmv', '.m4v'}
 
 # --- HELPER FUNCTIONS ---
 def _utcnow() -> datetime:
@@ -210,13 +221,45 @@ def _find_chromedriver():
 
 # --- UPLOAD FUNCTION ---
 
+def _validate_video_file(video_path: str) -> Tuple[bool, str]:
+    """Validates that the file exists and is a supported video format."""
+    path = Path(video_path)
+
+    # Check file exists
+    if not path.exists():
+        return False, f"File not found: {video_path}"
+
+    # Check it's a file, not directory
+    if not path.is_file():
+        return False, f"Path is not a file: {video_path}"
+
+    # Check file extension
+    if path.suffix.lower() not in SUPPORTED_VIDEO_FORMATS:
+        return False, f"Unsupported format: {path.suffix}. Supported: {', '.join(SUPPORTED_VIDEO_FORMATS)}"
+
+    # Check MIME type
+    mime_type, _ = mimetypes.guess_type(str(path))
+    if mime_type and not mime_type.startswith('video/'):
+        return False, f"File is not a video (detected: {mime_type})"
+
+    # Check file size (TikTok limit: ~4GB)
+    size_mb = path.stat().st_size / (1024 * 1024)
+    if size_mb > 4000:
+        return False, f"File too large: {size_mb:.1f}MB (max 4000MB)"
+    if size_mb < 0.1:
+        return False, f"File too small: {size_mb:.2f}MB (likely corrupt)"
+
+    return True, "Valid video file"
+
 def upload(video_path: str, description: str, local_session_key: str = None):
     ok, session_id, info = ensure_session_valid(local_session=local_session_key)
     if not ok or not session_id:
         return False, info
 
-    if not os.path.exists(video_path):
-        return False, f"File not found: {video_path}"
+    # Validate video file
+    valid, msg = _validate_video_file(video_path)
+    if not valid:
+        return False, msg
 
     logger.info("Starting TikTok upload for %s...", os.path.basename(video_path))
     
@@ -273,7 +316,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         # --- 1. INPUT RADAR ---
         _browser_log(driver, "Scanning for file input...")
         file_input = None
-        for i in range(30):
+        for i in range(FILE_INPUT_SEARCH_TIMEOUT):
             # Periodically clear popups
             if i % 3 == 0:
                 handle_standard_popups(driver)
@@ -307,16 +350,17 @@ def upload(video_path: str, description: str, local_session_key: str = None):
 
         _browser_log(driver, "Uploading file...")
         driver.execute_script("arguments[0].style.display = 'block';", file_input)
-        file_input.send_keys(os.path.abspath(video_path))
+        # Use pathlib for cross-platform path handling
+        file_input.send_keys(str(Path(video_path).resolve()))
         time.sleep(5)
         driver.switch_to.default_content()
 
         # --- 2. WAIT LOOP ---
         _browser_log(driver, "Waiting for upload completion...")
         upload_complete = False
-        
+
         # Pi optimization: Check less frequently (every 3s) to save CPU
-        for i in range(120): # Max 6 minutes
+        for i in range(UPLOAD_COMPLETE_TIMEOUT):
             # Only run heavy JS dismissal every few cycles to save Pi CPU
             if i % 2 == 0: 
                 handle_are_you_sure_exit(driver, _browser_log)
@@ -363,20 +407,23 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                 actions.perform()
 
                 # 2. Type description word-by-word to trigger Hashtags
-                # We do NOT use the URL. We type the #tag and hit SPACE to confirm it.
+                # FIXED: Use DOWN+ENTER to properly select from TikTok's autocomplete dropdown
                 parts = description.split(' ')
                 for part in parts:
                     actions = ActionChains(driver)
-                    
+
                     if part.startswith('#'):
-                        # Hashtag logic: Type -> Pause for Menu -> Space to confirm
+                        # Hashtag logic: Type -> Wait for dropdown -> DOWN to select -> ENTER to confirm
                         actions.send_keys(part)
-                        actions.pause(1) # Wait for "Tag" dropdown
-                        actions.send_keys(Keys.SPACE) # Select/Confirm tag
+                        actions.pause(1.5)  # Wait for TikTok autocomplete dropdown
+                        actions.send_keys(Keys.DOWN)  # Select first suggestion
+                        actions.pause(0.3)
+                        actions.send_keys(Keys.ENTER)  # Confirm selection
+                        actions.pause(0.5)  # Wait for tag to register
                     else:
                         # Normal word logic
                         actions.send_keys(part + " ")
-                    
+
                     actions.perform()
                     time.sleep(0.1) # Human-like typing speed
 
@@ -388,8 +435,8 @@ def upload(video_path: str, description: str, local_session_key: str = None):
 
         # --- 4. POST ---
         _browser_log(driver, "Looking for Post button...")
-        
-        for _ in range(30):
+
+        for _ in range(POST_BUTTON_TIMEOUT):
             try:
                 if handle_continue_to_post(driver, _browser_log):
                     time.sleep(1) 
@@ -427,7 +474,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         _browser_log(driver, "Verifying upload...")
 
         # Loop to catch "Continue to post?" modal or Success
-        for _ in range(120): # 60 seconds
+        for _ in range(VERIFICATION_TIMEOUT):
             # A. Success Indicators
             if "upload" not in driver.current_url or \
                len(driver.find_elements(By.XPATH, "//div[contains(., 'Manage your posts')]")) > 0 or \
@@ -448,18 +495,37 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         raise Exception("Verification failed - Success indicators not found")
 
     except Exception as e:
-        if driver:
-            _debug_dump(driver, "upload_failure")
-            if IS_LOCAL:
-                logger.error("Error! Leaving window open for 60s...")
-                time.sleep(60)
         logger.error(f"TikTok Upload Failed: {e}")
         set_account_state("tiktok", False, str(e))
+
+        if driver:
+            try:
+                _debug_dump(driver, "upload_failure")
+            except Exception as dump_err:
+                logger.warning(f"Failed to save debug dump: {dump_err}")
+
+            if IS_LOCAL:
+                logger.error("Error! Leaving window open for 60s...")
+                try:
+                    time.sleep(60)
+                except KeyboardInterrupt:
+                    logger.info("Debug wait interrupted by user")
+
         return False, str(e)
+
     finally:
-        if driver: 
-            try: driver.quit()
-            except: pass
+        # Ensure browser is always cleaned up, even if errors occur
+        if driver:
+            try:
+                driver.quit()
+                logger.debug("WebDriver closed successfully")
+            except Exception as quit_err:
+                logger.warning(f"Failed to quit WebDriver cleanly: {quit_err}")
+                # Force kill if normal quit fails
+                try:
+                    driver.service.process.kill()
+                except Exception:
+                    pass
 
 # --- LOCAL TESTING BLOCK ---
 if __name__ == "__main__":

@@ -117,12 +117,23 @@ def upload(video_path: str, caption: str):
         return False, msg
 
     def attempt_upload(client):
+        # Safely truncate caption to 2200 characters, accounting for multi-byte UTF-8
+        safe_caption = caption or ""
+        if len(safe_caption) > 2200:
+            # Truncate and ensure we don't break in the middle of a multi-byte character
+            safe_caption = safe_caption[:2200]
+            # Re-encode to handle potential broken UTF-8 at the boundary
+            try:
+                safe_caption = safe_caption.encode('utf-8', errors='ignore').decode('utf-8')
+            except Exception:
+                pass  # Fallback: use as-is
+
         return client.clip_upload(
             video_path,
-            caption=(caption or "")[:2200],
+            caption=safe_caption,
             extra_data={
                 "clips_share_preview_to_feed": "0",
-                "share_to_feed": "0" 
+                "share_to_feed": "0"
             }
         )
 
@@ -138,11 +149,21 @@ def upload(video_path: str, caption: str):
         _store_settings(cl)
         return True, f"Uploaded PK: {media.pk}"
 
-    # FIXED: Blindly trust upload success on ValidationError
+    # FIXED: Handle known Pydantic bug in instagrapi library
+    # The library sometimes fails to parse Instagram's response even when upload succeeds
+    # Specifically: clips_metadata.original_sound_info.audio_filter_infos expects list, gets None
     except ValidationError as e:
-        logger.warning(f"Instagram response parsing failed (Known Library Bug). Ignoring error as upload likely succeeded. Error: {e}")
-        set_account_state("instagram", True, None)
-        return True, "Uploaded (Blind success: Parsing error ignored)"
+        error_msg = str(e)
+        # Only ignore if it's the known audio_filter_infos parsing bug
+        if "audio_filter_infos" in error_msg or "clips_metadata" in error_msg:
+            logger.warning(f"Instagram response parsing failed (Known instagrapi Library Bug). Upload likely succeeded. Error: {e}")
+            set_account_state("instagram", True, None)
+            return True, "Upload successful (Response parsing error ignored)"
+        else:
+            # Different validation error - might be genuine failure
+            logger.error(f"Instagram validation error (Unknown): {e}")
+            set_account_state("instagram", False, f"Validation error: {error_msg[:200]}")
+            return False, f"Upload failed: {error_msg[:200]}"
 
     except Exception as exc:
         err_str = _format_error(exc)
@@ -164,11 +185,18 @@ def upload(video_path: str, caption: str):
                 media = attempt_upload(cl)
                 set_account_state("instagram", True, None)
                 return True, f"Uploaded PK: {media.pk} (Retry)"
-            
-            except ValidationError:
-                 logger.warning("Retry upload likely succeeded (Parsing error ignored).")
-                 set_account_state("instagram", True, None)
-                 return True, "Uploaded (Retry Blind Success)"
+
+            except ValidationError as retry_e:
+                retry_err_msg = str(retry_e)
+                # Same handling as above - only ignore known parsing bugs
+                if "audio_filter_infos" in retry_err_msg or "clips_metadata" in retry_err_msg:
+                    logger.warning("Retry upload likely succeeded (Known parsing bug ignored).")
+                    set_account_state("instagram", True, None)
+                    return True, "Upload successful (Retry - Response parsing error ignored)"
+                else:
+                    logger.error(f"Retry validation error: {retry_e}")
+                    set_account_state("instagram", False, f"Retry failed: {retry_err_msg[:200]}")
+                    return False, f"Retry failed: {retry_err_msg[:200]}"
             except Exception as retry_exc:
                 final_err = f"Retry failed: {_format_error(retry_exc)}"
                 set_account_state("instagram", False, final_err)
