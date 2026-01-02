@@ -1149,14 +1149,15 @@ div[data-testid="stToast"] {
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    padding: 0.5rem;
-    min-height: 70px;
+    padding: 0.5rem 0.3rem;
+    min-height: 75px;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     text-align: center;
     transition: all 0.2s ease;
+    box-sizing: border-box;
 }
 
 .calendar-day:hover {
@@ -1168,8 +1169,9 @@ div[data-testid="stToast"] {
 .calendar-day-header {
     font-size: 0.75rem;
     color: var(--text-secondary);
-    margin-bottom: 0.35rem;
+    margin-bottom: 0.3rem;
     font-weight: 500;
+    line-height: 1.2;
 }
 
 .calendar-day-header.today {
@@ -1179,11 +1181,11 @@ div[data-testid="stToast"] {
 
 /* Calendar day content */
 .calendar-day-content {
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     font-weight: 600;
-    padding: 0.25rem 0.5rem;
+    padding: 0.25rem 0.4rem;
     border-radius: 4px;
-    white-space: nowrap;
+    line-height: 1.3;
 }
 
 /* Calendar day states */
@@ -1249,35 +1251,12 @@ div[data-testid="stToast"] {
 @media (max-width: 768px) {
     .calendar-grid {
         grid-template-columns: repeat(7, 1fr);
-        gap: 0.35rem;
+        gap: 0.3rem;
     }
 
     .calendar-day {
         min-height: 60px;
-        padding: 0.35rem;
-    }
-
-    .calendar-day-header {
-        font-size: 0.65rem;
-        margin-bottom: 0.25rem;
-    }
-
-    .calendar-day-content {
-        font-size: 0.65rem;
-        padding: 0.2rem 0.35rem;
-    }
-}
-
-/* Extra small screens - stack in fewer columns */
-@media (max-width: 480px) {
-    .calendar-grid {
-        grid-template-columns: repeat(7, 1fr);
-        gap: 0.25rem;
-    }
-
-    .calendar-day {
-        min-height: 55px;
-        padding: 0.25rem;
+        padding: 0.3rem 0.2rem;
     }
 
     .calendar-day-header {
@@ -1286,7 +1265,30 @@ div[data-testid="stToast"] {
     }
 
     .calendar-day-content {
-        font-size: 0.6rem;
-        padding: 0.15rem 0.25rem;
+        font-size: 0.55rem;
+        padding: 0.2rem 0.25rem;
+    }
+}
+
+/* Extra small screens - compact but readable */
+@media (max-width: 480px) {
+    .calendar-grid {
+        grid-template-columns: repeat(7, 1fr);
+        gap: 0.25rem;
+    }
+
+    .calendar-day {
+        min-height: 55px;
+        padding: 0.25rem 0.15rem;
+    }
+
+    .calendar-day-header {
+        font-size: 0.55rem;
+        margin-bottom: 0.15rem;
+    }
+
+    .calendar-day-content {
+        font-size: 0.5rem;
+        padding: 0.15rem 0.2rem;
     }
 }

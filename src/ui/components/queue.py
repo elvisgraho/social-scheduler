@@ -61,10 +61,10 @@ def render_calendar_view(queue_rows):
         if has_upload:
             day_class = "calendar-day has-upload"
             count = len(scheduled_dates[date_key])
-            content = f"✓ {count} video{'s' if count > 1 else ''}"
+            content = f"✓ {count}"
         elif is_scheduled_day:
             day_class = "calendar-day gap-day"
-            content = "⚠ No upload"
+            content = "⚠"
         else:
             day_class = "calendar-day no-schedule"
             content = "—"
