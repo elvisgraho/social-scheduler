@@ -41,11 +41,11 @@ def render_calendar_view(queue_rows):
     schedule = get_schedule()
     enabled_weekdays = set(schedule["days"])  # 0=Monday, 6=Sunday
 
-    # Show next 14 days
+    # Show next 21 days
     today = datetime.now().date()
-    num_days = 14
+    num_days = 21
 
-    st.markdown("**Next 14 Days**")
+    st.markdown("**Next 21 Days**")
 
     # Build calendar HTML using CSS Grid
     calendar_html = '<div class="calendar-grid">'
