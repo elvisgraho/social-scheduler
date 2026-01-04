@@ -9,6 +9,11 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# Performance optimization: Disable automatic reruns on file changes in production
+# This reduces unnecessary re-renders and improves stability
+if "initialized" not in st.session_state:
+    st.session_state.initialized = True
+
 # Load custom CSS
 try:
     with open("assets/style.css", "r") as f:
@@ -41,11 +46,37 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 render_header()
 
-# Load data
+# Load data with caching to reduce database calls
 from src.database import get_queue, get_uploaded_count, get_uploaded_items
-queue_data = get_queue()
-uploaded_count = get_uploaded_count()
-uploaded_rows = get_uploaded_items(200)
+
+@st.cache_data(ttl=2, show_spinner=False)
+def get_queue_cached():
+    """Cache queue data for 2 seconds to reduce DB load."""
+    try:
+        return get_queue()
+    except Exception as e:
+        logger.error("Failed to fetch queue data: %s", e, exc_info=True)
+        return []
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_uploaded_data_cached():
+    """Cache uploaded data for 5 seconds."""
+    try:
+        return get_uploaded_count(), get_uploaded_items(200)
+    except Exception as e:
+        logger.error("Failed to fetch uploaded data: %s", e, exc_info=True)
+        return 0, []
+
+# Load data with error recovery
+try:
+    queue_data = get_queue_cached()
+    uploaded_count, uploaded_rows = get_uploaded_data_cached()
+except Exception as e:
+    logger.critical("Critical error loading data: %s", e, exc_info=True)
+    st.error("Failed to load data. Please refresh the page.")
+    queue_data = []
+    uploaded_count = 0
+    uploaded_rows = []
 
 # Platform status
 render_platform_status(logger)

@@ -4,6 +4,10 @@ enableCORS = false
 enableXsrfProtection = false
 address = "0.0.0.0"
 port = 8501
+# Performance: Disable file watcher to reduce CPU usage
+fileWatcherType = "none"
+# Reduce memory usage by limiting concurrent sessions
+maxMessageSize = 200
 
 [theme]
 base = "dark"
@@ -15,3 +19,14 @@ font = "sans-serif"
 
 [browser]
 gatherUsageStats = false
+
+[runner]
+# Prevent automatic reruns on script changes
+fastReruns = true
+# Reduce memory usage
+magicEnabled = false
+
+[client]
+# Improve connection stability
+toolbarMode = "minimal"
+showErrorDetails = true

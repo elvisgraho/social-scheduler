@@ -1,9 +1,10 @@
 import json
 import streamlit as st
+import pytz
 from pathlib import Path
 from datetime import datetime, timedelta
 from src.database import clear_platform_status, delete_from_queue, reschedule_queue_item, update_queue_status, get_queue_item, set_config, get_config
-from src.scheduling import next_daily_slots
+from src.scheduling import next_daily_slots, get_schedule
 from src.platform_registry import get_platforms
 from src import ui_logic
 
@@ -11,13 +12,25 @@ FORCE_KEY = "queue_force_run"
 FORCE_PLATFORM_KEY = "queue_force_platform"
 
 
+@st.fragment
 def render_calendar_view(queue_rows):
     """Render a calendar view of scheduled uploads with gap detection."""
-    from src.scheduling import get_schedule
-
     st.markdown("### **Calendar View**")
 
-    # Parse scheduled dates
+    # Early return if no data to reduce rendering overhead
+    if not queue_rows:
+        st.info("No scheduled uploads to display")
+        return
+
+    # Get schedule config for timezone consistency
+    schedule = get_schedule()
+    tz = pytz.timezone(schedule.get("timezone", "UTC"))
+    enabled_weekdays = set(schedule["days"])  # 0=Monday, 6=Sunday
+
+    # Use schedule timezone for today to match scheduled dates
+    today = datetime.now(tz).date()
+
+    # Parse scheduled dates using timezone-aware comparison
     scheduled_dates = {}
     for row in queue_rows:
         if row.get("status") in ("pending", "retry", "processing"):
@@ -26,6 +39,9 @@ def render_calendar_view(queue_rows):
                 try:
                     dt = ui_logic.parse_iso(scheduled_for)
                     if dt:
+                        # Convert to schedule timezone before extracting date
+                        if dt.tzinfo:
+                            dt = dt.astimezone(tz)
                         date_key = dt.date().isoformat()
                         if date_key not in scheduled_dates:
                             scheduled_dates[date_key] = []
@@ -37,18 +53,14 @@ def render_calendar_view(queue_rows):
         st.info("No scheduled uploads to display")
         return
 
-    # Get schedule config for gap detection
-    schedule = get_schedule()
-    enabled_weekdays = set(schedule["days"])  # 0=Monday, 6=Sunday
-
     # Show next 21 days
-    today = datetime.now().date()
     num_days = 21
 
     st.markdown("**Next 21 Days**")
 
-    # Build calendar HTML using CSS Grid
-    calendar_html = '<div class="calendar-grid">'
+    # Pre-calculate all calendar data to minimize HTML string operations
+    calendar_cells = []
+    gaps = []
 
     for i in range(num_days):
         day = today + timedelta(days=i)
@@ -57,7 +69,7 @@ def render_calendar_view(queue_rows):
         has_upload = date_key in scheduled_dates
         is_today = day == today
 
-        # Determine CSS class
+        # Determine CSS class and content
         if has_upload:
             day_class = "calendar-day has-upload"
             count = len(scheduled_dates[date_key])
@@ -65,6 +77,7 @@ def render_calendar_view(queue_rows):
         elif is_scheduled_day:
             day_class = "calendar-day gap-day"
             content = "⚠"
+            gaps.append(day.strftime("%a, %b %d"))
         else:
             day_class = "calendar-day no-schedule"
             content = "—"
@@ -72,36 +85,28 @@ def render_calendar_view(queue_rows):
         # Header styling
         header_class = "calendar-day-header today" if is_today else "calendar-day-header"
 
-        calendar_html += f'''
-        <div class="{day_class}">
-            <div class="{header_class}">{day.strftime('%a %d')}</div>
-            <div class="calendar-day-content">{content}</div>
-        </div>
-        '''
+        # Store cell HTML
+        calendar_cells.append(
+            f'<div class="{day_class}">'
+            f'<div class="{header_class}">{day.strftime("%a %d")}</div>'
+            f'<div class="calendar-day-content">{content}</div>'
+            f'</div>'
+        )
 
-    calendar_html += '</div>'
+    # Build complete calendar HTML in one operation (faster than concatenation)
+    calendar_html = '<div class="calendar-grid">' + ''.join(calendar_cells) + '</div>'
 
     # Render the calendar
     st.html(calendar_html)
 
-    # Show gap summary
-    gaps = []
-    for i in range(num_days):
-        day = today + timedelta(days=i)
-        is_scheduled_day = day.weekday() in enabled_weekdays
-        date_key = day.isoformat()
-        has_upload = date_key in scheduled_dates
-
-        if is_scheduled_day and not has_upload:
-            gaps.append(day.strftime("%a, %b %d"))
-
+    # Show gap summary if needed
     if gaps:
-        gap_warning_html = f'''
-        <div class="calendar-gap-warning">
-            <div class="calendar-gap-warning-title">⚠ Gaps Detected</div>
-            <div class="calendar-gap-warning-text">{', '.join(gaps[:5])}</div>
-        </div>
-        '''
+        gap_warning_html = (
+            '<div class="calendar-gap-warning">'
+            '<div class="calendar-gap-warning-title">⚠ Gaps Detected</div>'
+            f'<div class="calendar-gap-warning-text">{", ".join(gaps[:5])}</div>'
+            '</div>'
+        )
         st.html(gap_warning_html)
         if len(gaps) > 5:
             st.caption(f"... and {len(gaps) - 5} more")
@@ -163,6 +168,13 @@ def render_platform_status_row(row_id: int, platform_key: str, label: str, log_v
 def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
     """Render upload queue."""
 
+    # Initialize session state for expanded items to prevent re-expansion on rerun
+    if "expanded_queue_items" not in st.session_state:
+        st.session_state.expanded_queue_items = set()
+
+    # Track if we need to rerun (avoid unnecessary reruns)
+    needs_rerun = False
+
     # Calendar view at top
     with st.expander("📅 Calendar View", expanded=False):
         render_calendar_view(queue_rows)
@@ -173,21 +185,38 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Shuffle Queue", key="shuffle_queue_btn", disabled=not has_queue_items):
-            shuffled, _ = ui_logic.shuffle_queue(queue_rows)
-            logger.info("Queue shuffled: %d items", shuffled)
-            st.success(f"Shuffled {shuffled} items!")
-            st.rerun()
+            try:
+                shuffled, _ = ui_logic.shuffle_queue(queue_rows)
+                if shuffled > 0:
+                    logger.info("Queue shuffled: %d items", shuffled)
+                    # Clear cache to show updated data
+                    st.cache_data.clear()
+                    st.success(f"Shuffled {shuffled} items!")
+                    st.rerun()
+                else:
+                    st.info("No items to shuffle")
+            except Exception as e:
+                logger.error("Failed to shuffle queue: %s", e, exc_info=True)
+                st.error("Failed to shuffle queue. Please try again.")
     with c2:
         if st.button("Delete Next", key="delete_next_btn", type="secondary", disabled=not bool(queue_rows)):
-            next_item = next((row for row in queue_rows if row.get("status") in ("pending", "retry", "failed")), None)
-            if next_item:
-                delete_from_queue(next_item["id"])
-                fp = Path(next_item["file_path"])
-                if fp.exists():
-                    fp.unlink(missing_ok=True)
-                logger.info("Deleted queue item #%s", next_item["id"])
-                st.success(f"Removed #{next_item['id']}")
-                st.rerun()
+            try:
+                next_item = next((row for row in queue_rows if row.get("status") in ("pending", "retry", "failed")), None)
+                if next_item:
+                    delete_from_queue(next_item["id"])
+                    fp = Path(next_item["file_path"])
+                    if fp.exists():
+                        fp.unlink(missing_ok=True)
+                    logger.info("Deleted queue item #%s", next_item["id"])
+                    # Clear cache to show updated data
+                    st.cache_data.clear()
+                    st.success(f"Removed #{next_item['id']}")
+                    st.rerun()
+                else:
+                    st.info("No items to delete")
+            except Exception as e:
+                logger.error("Failed to delete queue item: %s", e, exc_info=True)
+                st.error("Failed to delete item. Please try again.")
     
     # Upload section
     st.markdown("### **Upload**")
@@ -253,7 +282,6 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                 )
 
             # Combine date and time
-            from datetime import datetime
             custom_datetime = datetime.combine(custom_date, custom_time)
 
             # Replace timezone info from schedule start time
@@ -262,7 +290,11 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                 custom_datetime = custom_datetime.replace(tzinfo=start_dt.tzinfo)
 
             # Preview
-            st.video(uploaded_files[0])
+            try:
+                st.video(uploaded_files[0])
+            except Exception as e:
+                logger.warning("Failed to preview uploaded video: %s", e)
+                st.warning("⚠ Video preview unavailable (file may be processing)")
 
             if st.button("Queue Video", key="queue_custom_video_btn", type="primary"):
                 if not enabled_platforms:
@@ -281,47 +313,93 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                         if count > 0:
                             logger.info("Queued custom video for %s", custom_datetime.isoformat())
                             st.session_state["queued_sig"] = sig
+                            # Clear cache to show updated queue
+                            st.cache_data.clear()
                             st.success(f"Video queued for {custom_datetime.strftime('%b %d, %Y at %H:%M')}!")
                             st.rerun()
+                        elif count == 0:
+                            st.error("Failed to queue video. Check logs for details.")
+                    else:
+                        st.warning("This video has already been queued.")
         else:
-            # Multiple videos = batch mode with global settings
-            start_dt = ui_logic.get_schedule_start_time(queue_rows)
-            occupied = ui_logic.occupied_schedule_dates(queue_rows)
-            slots = next_daily_slots(len(uploaded_files), start=start_dt, occupied_dates=occupied)
+            # Multiple videos = auto-queue with batch mode
+            # Auto-queue: Create signature and check if already processed
+            try:
+                sig_data = tuple((f.name, getattr(f, "size", None)) for f in uploaded_files)
+                sig = hash(sig_data)
+            except Exception:
+                # Fallback to simple count if hashing fails
+                sig = f"batch_{len(uploaded_files)}_{datetime.now().timestamp()}"
 
-            if len(slots) < len(uploaded_files):
-                logger.warning("Not enough schedule slots for %d videos", len(uploaded_files))
-                st.error(f"Not enough slots")
-            else:
-                st.markdown(f"**{len(uploaded_files)} videos** scheduled")
+            # Only process if these files haven't been queued yet
+            if st.session_state.get("queued_sig") != sig:
+                # Get schedule slots
+                start_dt = ui_logic.get_schedule_start_time(queue_rows)
+                occupied = ui_logic.occupied_schedule_dates(queue_rows)
+                slots = next_daily_slots(len(uploaded_files), start=start_dt, occupied_dates=occupied)
 
-                # Preview first 2
-                for uploaded in uploaded_files[:2]:
-                    st.video(uploaded)
+                if len(slots) < len(uploaded_files):
+                    logger.warning("Not enough schedule slots for %d videos", len(uploaded_files))
+                    st.error(f"❌ Not enough schedule slots available for {len(uploaded_files)} videos")
+                    st.info(f"Only {len(slots)} slots available. Please check your schedule settings.")
+                else:
+                    # Show what's being queued
+                    st.markdown(f"**Queuing {len(uploaded_files)} videos...**")
 
-                # View schedule
-                with st.expander("Schedule"):
-                    st.write("\n".join(s.strftime("%b %d %H:%M") for s in slots))
-
-                if st.button(f"Queue {len(uploaded_files)} Videos", key="queue_videos_btn", type="primary"):
-                    sig = tuple((f.name, getattr(f, "size", None)) for f in uploaded_files)
-                    if st.session_state.get("queued_sig") != sig:
+                    # Show progress
+                    with st.spinner(f"Processing {len(uploaded_files)} files..."):
                         count = ui_logic.save_files_to_queue(uploaded_files, slots, UPLOAD_DIR, shuffle_order=False)
-                        if count > 0:
-                            logger.info("Queued %d videos for upload", count)
-                            st.session_state["queued_sig"] = sig
-                            st.success(f"Queued {count} videos!")
-                            st.rerun()
+
+                    if count > 0:
+                        logger.info("Auto-queued %d videos for upload", count)
+                        st.session_state["queued_sig"] = sig
+                        # Clear cache to show updated queue
+                        st.cache_data.clear()
+                        st.success(f"✅ Successfully queued {count} videos!")
+
+                        # Show schedule preview
+                        with st.expander("📅 View Schedule", expanded=False):
+                            for i, slot in enumerate(slots[:count], 1):
+                                st.caption(f"{i}. {slot.strftime('%a, %b %d at %H:%M')}")
+
+                        st.rerun()
+                    elif count == 0:
+                        st.error("❌ Failed to queue videos. Check logs for details.")
+            else:
+                # Already queued - show info
+                st.info(f"ℹ️ {len(uploaded_files)} videos already queued")
+                st.caption("Upload different files or refresh to queue again")
     else:
         st.session_state.pop("queued_sig", None)
     
     # Queue list
     st.markdown("### **Queue**")
-    
+
     if queue_rows:
         platforms = get_platforms()
 
-        for row in queue_rows:
+        # Add pagination to prevent crashes with many videos
+        items_per_page = 20
+        total_items = len(queue_rows)
+        total_pages = max(1, (total_items + items_per_page - 1) // items_per_page)
+
+        if total_items > items_per_page:
+            page = st.number_input(
+                "Page",
+                min_value=1,
+                max_value=total_pages,
+                value=1,
+                step=1,
+                key="queue_page"
+            )
+            st.caption(f"Showing {min(items_per_page, total_items)} of {total_items} items")
+            start_idx = (page - 1) * items_per_page
+            end_idx = min(start_idx + items_per_page, total_items)
+            displayed_rows = queue_rows[start_idx:end_idx]
+        else:
+            displayed_rows = queue_rows
+
+        for row in displayed_rows:
             status_icons = {"pending": "Pending", "processing": "Processing", "uploaded": "Done", "failed": "Failed", "retry": "Retry"}
             icon = status_icons.get(row['status'], row['status'].title())
 
@@ -347,9 +425,13 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
 
             # Build title with platform indicators
             platform_indicator = f" [{'/'.join(enabled_platforms_display)}]" if enabled_platforms_display else ""
-            expander_title = f"{icon} #{row['id']} - {Path(row['file_path']).name[:25]}{platform_indicator}"
+            file_name = Path(row['file_path']).name[:30]
+            expander_title = f"{icon} #{row['id']} - {file_name}{platform_indicator}"
 
-            with st.expander(expander_title):
+            # Default to collapsed unless user explicitly opened it
+            is_expanded = row['id'] in st.session_state.expanded_queue_items
+
+            with st.expander(expander_title, expanded=is_expanded):
                 col_info, col_vid = st.columns([1, 1])
 
                 with col_info:
@@ -394,30 +476,70 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                     st.markdown("---")
                     ac1, ac2 = st.columns(2)
                     if ac1.button("Delete", key=f"del_{row['id']}"):
-                        delete_from_queue(row["id"])
-                        fp = Path(row["file_path"])
-                        if fp.exists():
-                            fp.unlink(missing_ok=True)
-                        logger.info("Deleted queue item #%s from queue list", row["id"])
-                        st.rerun()
-                    if ac2.button("Reschedule", key=f"rsc_{row['id']}"):
-                        anchor = ui_logic.parse_iso(row.get("scheduled_for")) or ui_logic.get_schedule_start_time(queue_rows)
-                        occupied = ui_logic.occupied_schedule_dates(queue_rows)
-                        curr_dt = ui_logic.parse_iso(row.get("scheduled_for"))
-                        if curr_dt:
-                            occupied.discard(curr_dt.date().isoformat())
-                        future = next_daily_slots(1, start=anchor, occupied_dates=occupied)
-                        if future:
-                            reschedule_queue_item(row["id"], future[0].isoformat())
-                            logger.info("Rescheduled queue item #%s to %s", row["id"], future[0].isoformat())
-                            st.success("Rescheduled!")
+                        try:
+                            delete_from_queue(row["id"])
+                            fp = Path(row["file_path"])
+                            if fp.exists():
+                                fp.unlink(missing_ok=True)
+                            logger.info("Deleted queue item #%s from queue list", row["id"])
+                            # Clear cache to show updated queue
+                            st.cache_data.clear()
                             st.rerun()
+                        except Exception as e:
+                            logger.error("Failed to delete queue item #%s: %s", row["id"], e, exc_info=True)
+                            st.error("Failed to delete. Please try again.")
+                    if ac2.button("Reschedule", key=f"rsc_{row['id']}"):
+                        try:
+                            anchor = ui_logic.parse_iso(row.get("scheduled_for")) or ui_logic.get_schedule_start_time(queue_rows)
+                            occupied = ui_logic.occupied_schedule_dates(queue_rows)
+                            curr_dt = ui_logic.parse_iso(row.get("scheduled_for"))
+                            if curr_dt:
+                                occupied.discard(curr_dt.date().isoformat())
+                            future = next_daily_slots(1, start=anchor, occupied_dates=occupied)
+                            if future:
+                                reschedule_queue_item(row["id"], future[0].isoformat())
+                                logger.info("Rescheduled queue item #%s to %s", row["id"], future[0].isoformat())
+                                # Clear cache to show updated schedule
+                                st.cache_data.clear()
+                                st.success("Rescheduled!")
+                                st.rerun()
+                            else:
+                                st.warning("No available schedule slots found")
+                        except Exception as e:
+                            logger.error("Failed to reschedule item #%s: %s", row["id"], e, exc_info=True)
+                            st.error("Failed to reschedule. Please try again.")
                 
                 with col_vid:
-                    if Path(row["file_path"]).exists():
-                        st.video(str(row["file_path"]))
+                    # Only load video if user wants to see it (performance optimization)
+                    if st.checkbox("Show video preview", key=f"preview_{row['id']}", value=False):
+                        file_path = Path(row["file_path"])
+                        if file_path.exists():
+                            try:
+                                # Use absolute path for better compatibility
+                                abs_path = file_path.resolve()
+                                st.video(str(abs_path), start_time=0)
+                            except Exception as e:
+                                logger.warning("Failed to render video for queue item #%s: %s", row["id"], e)
+                                st.warning("⚠ Video preview unavailable")
+                                # Show file info as fallback
+                                try:
+                                    file_size_mb = file_path.stat().st_size / (1024 * 1024)
+                                    st.caption(f"File: {file_path.name} ({file_size_mb:.1f} MB)")
+                                except Exception:
+                                    st.caption(f"File: {file_path.name}")
+                        else:
+                            logger.warning("File missing for queue item #%s: %s", row["id"], row["file_path"])
+                            st.error("❌ File missing")
                     else:
-                        logger.warning("File missing for queue item #%s: %s", row["id"], row["file_path"])
-                        st.warning("File missing")
+                        # Show file info without loading video
+                        file_path = Path(row["file_path"])
+                        if file_path.exists():
+                            try:
+                                file_size_mb = file_path.stat().st_size / (1024 * 1024)
+                                st.info(f"📹 {file_path.name}\n\n{file_size_mb:.1f} MB")
+                            except Exception:
+                                st.info(f"📹 {file_path.name}")
+                        else:
+                            st.error("❌ File missing")
     else:
         st.info("No videos in queue")

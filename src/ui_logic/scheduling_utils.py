@@ -1,10 +1,16 @@
+import json
+import logging
 import random
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Set, Tuple
+
 import pytz
+
 from src.database import reschedule_queue_item, update_queue_status
 from src.scheduling import get_schedule, next_daily_slots
 from src.ui_logic.datetime_utils import parse_iso
+
+logger = logging.getLogger("ui_logic")
 
 
 def get_schedule_start_time(queue_rows: List[Dict[str, Any]]) -> datetime:
@@ -44,7 +50,14 @@ def occupied_schedule_dates(queue_rows: List[Dict[str, Any]]) -> Set[str]:
     """
     Return set of YYYY-MM-DD strings already scheduled for active items.
     Includes failed rows so new/rescheduled items don't land on the same day.
+    Uses schedule timezone for date extraction to match calendar view.
     """
+    cfg = get_schedule()
+    try:
+        tz = pytz.timezone(cfg.get("timezone", "UTC"))
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+
     dates = set()
     for row in queue_rows:
         if row.get("status") not in ("pending", "retry", "processing", "failed"):
@@ -52,8 +65,12 @@ def occupied_schedule_dates(queue_rows: List[Dict[str, Any]]) -> Set[str]:
         dt = parse_iso(row.get("scheduled_for"))
         if not dt:
             continue
-        dt = dt.date()
-        dates.add(dt.isoformat())
+        # Convert to schedule timezone before extracting date
+        if dt.tzinfo:
+            dt = dt.astimezone(tz)
+        elif dt.tzinfo is None:
+            dt = tz.localize(dt)
+        dates.add(dt.date().isoformat())
     return dates
 
 
@@ -110,10 +127,6 @@ def reschedule_pending_items(
     Failed items are re-marked as retry so they re-enter the worker.
     Returns (count_rescheduled, first_slot_used).
     """
-    import json
-    import logging
-    logger = logging.getLogger("ui_logic")
-    
     pending_items = [row for row in queue_rows if row.get("status") in ("pending", "retry", "failed")]
     if not pending_items:
         return 0, None

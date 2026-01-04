@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ import pandas as pd
 
 from src.database import add_to_queue, get_config
 from src.scheduling import next_daily_slots
+from src.ui_logic.datetime_utils import format_datetime_for_ui
 
 logger = logging.getLogger("ui_logic")
 
@@ -23,10 +25,12 @@ def save_files_to_queue(
     Saves uploaded Streamlit files to disk and adds them to the DB queue.
     Returns the count of successfully queued items.
     """
-    import random
-
     if not files or not slots:
         return 0
+
+    # Validate files list
+    if not isinstance(files, list):
+        files = [files]
 
     title = get_config("global_title", "Daily Short")
     desc = get_config("global_desc", "#shorts")
@@ -42,18 +46,32 @@ def save_files_to_queue(
     sequence = 1
 
     for uploaded_file, slot in paired:
-        ext = Path(uploaded_file.name).suffix or ".mp4"
-        destination = upload_dir / f"{base_timestamp}_{sequence:02d}{ext}"
-
-        # Ensure uniqueness even if multiple uploads land in the same second
-        while destination.exists():
-            sequence += 1
-            destination = upload_dir / f"{base_timestamp}_{sequence:02d}{ext}"
-        sequence += 1
-
         try:
+            # Validate uploaded file has required attributes
+            if not hasattr(uploaded_file, 'name') or not hasattr(uploaded_file, 'getbuffer'):
+                logger.error("Invalid file object: %s", uploaded_file)
+                continue
+
+            ext = Path(uploaded_file.name).suffix or ".mp4"
+            destination = upload_dir / f"{base_timestamp}_{sequence:02d}{ext}"
+
+            # Ensure uniqueness even if multiple uploads land in the same second
+            while destination.exists():
+                sequence += 1
+                destination = upload_dir / f"{base_timestamp}_{sequence:02d}{ext}"
+            sequence += 1
+
+            # Write file to disk
             with destination.open("wb") as f:
-                f.write(uploaded_file.getbuffer())
+                buffer = uploaded_file.getbuffer()
+                f.write(buffer)
+
+            # Verify file was written
+            if not destination.exists() or destination.stat().st_size == 0:
+                logger.error("File write failed or empty: %s", destination)
+                if destination.exists():
+                    destination.unlink()
+                continue
 
             # Add to DB - None for enabled_platforms means all platforms enabled
             add_to_queue(str(destination), slot.isoformat(), title, desc, enabled_platforms=None)
@@ -61,9 +79,9 @@ def save_files_to_queue(
             success_count += 1
 
         except Exception as e:
-            logger.error("Failed to save or queue file %s: %s", uploaded_file.name, e)
+            logger.error("Failed to save or queue file %s: %s", getattr(uploaded_file, 'name', 'unknown'), e, exc_info=True)
             # Cleanup orphan file if DB insert failed
-            if destination.exists():
+            if 'destination' in locals() and destination.exists():
                 try:
                     destination.unlink()
                 except OSError:
@@ -84,19 +102,33 @@ def save_custom_video_to_queue(
     Saves a single video with custom scheduling, title, description, and platform selection.
     Returns 1 if successful, 0 otherwise.
     """
-    base_timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-    ext = Path(uploaded_file.name).suffix or ".mp4"
-    destination = upload_dir / f"{base_timestamp}_custom{ext}"
-
-    # Ensure uniqueness
-    sequence = 1
-    while destination.exists():
-        destination = upload_dir / f"{base_timestamp}_custom_{sequence:02d}{ext}"
-        sequence += 1
-
     try:
+        # Validate uploaded file
+        if not hasattr(uploaded_file, 'name') or not hasattr(uploaded_file, 'getbuffer'):
+            logger.error("Invalid file object for custom upload")
+            return 0
+
+        base_timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        ext = Path(uploaded_file.name).suffix or ".mp4"
+        destination = upload_dir / f"{base_timestamp}_custom{ext}"
+
+        # Ensure uniqueness
+        sequence = 1
+        while destination.exists():
+            destination = upload_dir / f"{base_timestamp}_custom_{sequence:02d}{ext}"
+            sequence += 1
+
+        # Write file to disk
         with destination.open("wb") as f:
-            f.write(uploaded_file.getbuffer())
+            buffer = uploaded_file.getbuffer()
+            f.write(buffer)
+
+        # Verify file was written
+        if not destination.exists() or destination.stat().st_size == 0:
+            logger.error("File write failed or empty: %s", destination)
+            if destination.exists():
+                destination.unlink()
+            return 0
 
         # Convert enabled_platforms list to JSON string
         platforms_json = json.dumps(enabled_platforms) if enabled_platforms else None
@@ -114,9 +146,9 @@ def save_custom_video_to_queue(
         return 1
 
     except Exception as e:
-        logger.error("Failed to save or queue custom video %s: %s", uploaded_file.name, e)
+        logger.error("Failed to save or queue custom video %s: %s", getattr(uploaded_file, 'name', 'unknown'), e, exc_info=True)
         # Cleanup orphan file if DB insert failed
-        if destination.exists():
+        if 'destination' in locals() and destination.exists():
             try:
                 destination.unlink()
             except OSError:
@@ -191,8 +223,6 @@ def get_storage_summary(data_dir: Path) -> Tuple[Optional[float], Optional[float
 
 def format_queue_dataframe(queue_rows: List[Dict[str, Any]]) -> pd.DataFrame:
     """Converts raw DB rows into a clean Pandas DataFrame for the UI."""
-    from src.ui_logic.datetime_utils import format_datetime_for_ui
-    
     data = []
     for row in queue_rows:
         data.append({

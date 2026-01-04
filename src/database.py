@@ -12,9 +12,22 @@ def _ensure_db_dir() -> None:
 
 
 def get_conn() -> sqlite3.Connection:
+    """Get database connection with optimization settings."""
     _ensure_db_dir()
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn = sqlite3.connect(
+        DB_FILE,
+        check_same_thread=False,
+        timeout=10.0,  # Wait up to 10 seconds for locks
+        isolation_level='DEFERRED'  # Better concurrency
+    )
     conn.row_factory = sqlite3.Row
+
+    # Performance optimizations
+    conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging for better concurrency
+    conn.execute("PRAGMA synchronous=NORMAL")  # Balance between safety and speed
+    conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
+    conn.execute("PRAGMA temp_store=MEMORY")  # Store temp tables in memory
+
     return conn
 
 

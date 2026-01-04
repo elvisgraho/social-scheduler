@@ -415,11 +415,11 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                     if part.startswith('#'):
                         # Hashtag logic: Type -> Wait for dropdown -> DOWN to select -> ENTER to confirm
                         actions.send_keys(part)
-                        actions.pause(1.5)  # Wait for TikTok autocomplete dropdown
+                        actions.pause(3)  # Wait for TikTok autocomplete dropdown
                         actions.send_keys(Keys.DOWN)  # Select first suggestion
-                        actions.pause(0.3)
+                        actions.pause(0.5)
                         actions.send_keys(Keys.ENTER)  # Confirm selection
-                        actions.pause(0.5)  # Wait for tag to register
+                        actions.pause(1)  # Wait for tag to register
                     else:
                         # Normal word logic
                         actions.send_keys(part + " ")
