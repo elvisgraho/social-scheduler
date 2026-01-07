@@ -33,7 +33,7 @@ PAUSE_KEY = "queue_paused"
 FORCE_KEY = "queue_force_run"
 FORCE_PLATFORM_KEY = "queue_force_platform"
 TOKEN_CHECK_KEY = "last_token_check_date"
-TOKEN_CHECK_TIME = dtime(hour=8, minute=0)
+# Note: TOKEN_CHECK_TIME is no longer used (now uses 6-10 AM window for randomness)
 
 
 def _now_with_timezone() -> datetime:
@@ -71,24 +71,23 @@ def _platform_shuffle_enabled() -> bool:
 def _run_token_checks(now: datetime) -> None:
     """
     Validate platform tokens/sessions and warn on failure.
+    Only runs once per week to avoid suspicious repeated login checks.
     """
     ok, msg = verify_youtube_credentials(probe_api=False)
     if ok:
-        logger.info("Daily YouTube token verification passed.")
+        logger.info("Weekly YouTube token verification passed.")
         set_config("last_youtube_ok", now.isoformat())
     else:
         _notify(f"YouTube token check failed: {msg}")
 
-    ig_ok, ig_msg = instagram_platform.verify_login()
-    if ig_ok:
-        logger.info("Daily Instagram session verification passed.")
-        set_config("last_instagram_ok", now.isoformat())
-    else:
-        _notify(f"Instagram session check failed: {ig_msg}")
+    # SKIP Instagram verification - it's unnecessary and suspicious
+    # Instagram sessions are checked naturally during uploads
+    # No need to create extra login events that could trigger bot detection
+    logger.info("Skipping Instagram verification (checked during actual uploads)")
 
     tt_ok, tt_msg = tiktok_platform.verify_session(force=True)
     if tt_ok:
-        logger.info("Daily TikTok session verification passed.")
+        logger.info("Weekly TikTok session verification passed.")
         set_config("last_tiktok_ok", now.isoformat())
     else:
         _notify(f"TikTok session check failed: {tt_msg}")
@@ -98,17 +97,33 @@ def _run_token_checks(now: datetime) -> None:
 
 def _maybe_verify_tokens(now: datetime) -> None:
     """
-    Run token checks once per day after the configured morning time.
+    Run token checks once per week (not daily) to avoid suspicious patterns.
+    Only runs in the 6-10 AM window, and only once that day.
     """
     try:
         last_run = get_config(TOKEN_CHECK_KEY)
-        if last_run == now.date().isoformat():
+
+        # Check if we already ran today - prevents multiple runs in same day
+        if last_run and last_run == now.date().isoformat():
             return
-        if now.time() < TOKEN_CHECK_TIME:
+
+        # Check if 7 days have passed since last check
+        if last_run:
+            from datetime import datetime as dt
+            last_check = dt.fromisoformat(last_run).date()
+            days_since = (now.date() - last_check).days
+            # Only run once per week (7 days minimum)
+            if days_since < 7:
+                return
+
+        # Add randomness: only run checks between 6 AM and 10 AM (not exactly 8 AM)
+        if not (dtime(hour=6, minute=0) <= now.time() <= dtime(hour=10, minute=0)):
             return
+
+        # All conditions met - run the check
         _run_token_checks(now)
     except Exception as exc:
-        logger.warning("Skipping daily token check: %s", exc)
+        logger.warning("Skipping token check: %s", exc)
 
 
 def _pull_queue_forward(now: datetime) -> None:
