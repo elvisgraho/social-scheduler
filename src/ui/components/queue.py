@@ -222,6 +222,7 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
     st.markdown("### **Upload**")
     uploaded_files = st.file_uploader(
         "Drop videos (mp4, mov)",
+        label_visibility="hidden",
         type=["mp4", "mov", "m4v"],
         accept_multiple_files=True
     )

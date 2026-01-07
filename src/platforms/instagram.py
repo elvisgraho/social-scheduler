@@ -1,10 +1,11 @@
 import json
 import time
+import random
 from typing import Tuple
 
 from instagrapi import Client
 from instagrapi.exceptions import (
-    ChallengeRequired, 
+    ChallengeRequired,
     TwoFactorRequired,
 )
 from pydantic import ValidationError
@@ -57,15 +58,52 @@ def _extract_sessionid(raw: str) -> str:
                         return str(cookie.get("value", "")).strip()
     return raw
 
+def _simulate_human_warmup(cl: Client) -> None:
+    """Simulate human-like activity before uploading to avoid bot detection."""
+    try:
+        logger.info("Warming up Instagram session with human-like activity...")
+
+        # Random delay before starting activities (2-8 seconds)
+        time.sleep(random.uniform(2, 8))
+
+        # Only check timeline 30% of the time to avoid predictable pattern
+        # Real users don't always check feed before posting
+        if random.random() < 0.3:
+            try:
+                cl.get_timeline_feed()
+                logger.debug("Checked timeline feed")
+                time.sleep(random.uniform(3, 7))
+            except Exception as e:
+                logger.debug(f"Timeline check failed (non-critical): {e}")
+
+        # Random pause like a human would do
+        time.sleep(random.uniform(5, 12))
+
+    except Exception as e:
+        logger.warning(f"Session warmup encountered error (continuing anyway): {e}")
+
 def _load_settings(cl: Client) -> bool:
     session_data = get_config(SESSION_KEY)
     if session_data:
         try:
-            cl.set_settings(json.loads(session_data))
+            settings = json.loads(session_data)
+            cl.set_settings(settings)
             return True
         except Exception:
             logger.warning("Failed to load stored Instagram session settings.")
     return False
+
+def _initialize_client() -> Client:
+    """Initialize client with human-like timing."""
+    cl = Client()
+
+    # Let instagrapi use its own tested user agent - it's designed for this
+    # We focus on timing instead, which is what really matters for bot detection
+
+    # Human-like delays between requests (3-8 seconds instead of fixed 1-3)
+    cl.delay_range = [3, 8]
+
+    return cl
 
 def _store_settings(cl: Client) -> None:
     try:
@@ -108,13 +146,15 @@ def _login(cl: Client) -> Tuple[bool, str]:
         return False, err_str
 
 def upload(video_path: str, caption: str):
-    cl = Client()
-    cl.delay_range = [1, 3]
-    
+    cl = _initialize_client()
+
     using_session = _load_settings(cl)
     ok, msg = _login(cl)
     if not ok:
         return False, msg
+
+    # Simulate human warmup activity before uploading
+    _simulate_human_warmup(cl)
 
     def attempt_upload(client):
         # Safely truncate caption to 2200 characters, accounting for multi-byte UTF-8
@@ -176,10 +216,13 @@ def upload(video_path: str, caption: str):
                 username, password = _credentials()
                 if not username or not password:
                     raise Exception("No credentials for retry.")
-                
-                cl = Client()
+
+                cl = _initialize_client()
                 cl.login(username, password)
                 _store_settings(cl)
+
+                # Warmup again after fresh login
+                _simulate_human_warmup(cl)
                 
                 # Retry Upload
                 media = attempt_upload(cl)
@@ -209,7 +252,7 @@ def upload(video_path: str, caption: str):
         return False, err_str
 
 def verify_login() -> Tuple[bool, str]:
-    cl = Client()
+    cl = _initialize_client()
     _load_settings(cl)
     ok, msg = _login(cl)
     if ok:

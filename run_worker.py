@@ -294,8 +294,17 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
             # CONTINUE to other platforms instead of stopping
             continue
 
-        # Add Jitter (wait 10-30 seconds between platforms to avoid bot detection)
-        time.sleep(random.uniform(10, 30))
+        # Add delay BETWEEN platforms (not before first platform)
+        # This simulates switching between apps like a human would
+        if idx > 0:
+            if key == "instagram":
+                # Instagram is most sensitive to bot detection, add longer delay
+                delay = random.uniform(60, 180)  # 1-3 minutes
+                logger.info("Waiting %d seconds before Instagram upload (human-like delay)...", int(delay))
+            else:
+                delay = random.uniform(30, 90)  # 30 seconds to 1.5 minutes
+                logger.info("Waiting %d seconds before %s upload...", int(delay), key)
+            time.sleep(delay)
 
         # Get platform-specific title/description
         # Priority: video-specific override > global platform override > base title/description
