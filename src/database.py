@@ -488,7 +488,7 @@ def clear_platform_status(queue_id: int, platform_key: str) -> bool:
         row = conn.execute("SELECT platform_logs FROM queue WHERE id = ?", (queue_id,)).fetchone()
         if not row:
             return False
-        
+
         logs = {}
         raw_logs = row["platform_logs"]
         if raw_logs:
@@ -496,17 +496,57 @@ def clear_platform_status(queue_id: int, platform_key: str) -> bool:
                 logs = json.loads(raw_logs) if isinstance(raw_logs, str) else raw_logs
             except (json.JSONDecodeError, TypeError):
                 logs = {}
-        
+
         # Clear the specific platform status
         if platform_key in logs:
             del logs[platform_key]
-            
+
             conn.execute(
                 "UPDATE queue SET platform_logs = ? WHERE id = ?",
                 (json.dumps(logs), queue_id)
             )
             conn.commit()
             return True
+        return False
+    finally:
+        conn.close()
+
+
+def restore_archived_to_queue(upload_id: int) -> bool:
+    """
+    Restore an archived upload back to the queue with 'failed' status.
+    Returns True if successful, False otherwise.
+    """
+    conn = get_conn()
+    try:
+        # Get the archived upload
+        row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
+        if not row:
+            return False
+
+        upload_dict = dict(row)
+
+        # Insert back into queue with 'failed' status
+        conn.execute(
+            """
+            INSERT INTO queue (file_path, scheduled_for, title, description, platform_logs, status, attempts)
+            VALUES (?, ?, ?, ?, ?, 'failed', 0)
+            """,
+            (
+                upload_dict.get("file_path"),
+                datetime.utcnow().isoformat(),  # Schedule for now
+                upload_dict.get("title"),
+                upload_dict.get("description"),
+                upload_dict.get("platform_logs"),
+            ),
+        )
+
+        # Delete from uploads table
+        conn.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
         return False
     finally:
         conn.close()

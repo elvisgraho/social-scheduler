@@ -3,7 +3,7 @@ import streamlit as st
 import pytz
 from pathlib import Path
 from datetime import datetime, timedelta
-from src.database import clear_platform_status, delete_from_queue, reschedule_queue_item, update_queue_status, get_queue_item, set_config, get_config
+from src.database import clear_platform_status, delete_from_queue, reschedule_queue_item, update_queue_status, get_queue_item, set_config, get_config, restore_archived_to_queue, delete_uploaded_item
 from src.scheduling import next_daily_slots, get_schedule
 from src.platform_registry import get_platforms
 from src import ui_logic
@@ -544,3 +544,173 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                             st.error("❌ File missing")
     else:
         st.info("No videos in queue")
+
+    # Render archived uploads section below the queue
+    render_archived_uploads(uploaded_rows, logger)
+
+
+def render_archived_platform_row(archive_id: int, platform_key: str, label: str, log_value, logger):
+    """Render status and restore button for a single platform in archived uploads."""
+    logs = _parse_platform_logs(log_value)
+    status_text = logs.get(platform_key, "")
+
+    # Determine status
+    is_success = "success" in str(status_text).lower() or "uploaded" in str(status_text).lower() or "id:" in str(status_text).lower()
+    is_failed = status_text and not is_success
+
+    # Show status
+    if is_success:
+        st.success(f"✓ {label}: Success")
+    elif is_failed:
+        st.error(f"✗ {label}: {status_text[:40]}...")
+    else:
+        st.info(f"○ {label}: Not attempted")
+
+    # Restore button for failed/not attempted platforms
+    if not is_success:
+        if st.button(f"Restore & Force {label}", key=f"restore_force_{archive_id}_{platform_key}", type="primary"):
+            try:
+                # Restore to queue
+                success = restore_archived_to_queue(archive_id)
+                if success:
+                    # Get the newly restored queue item (it should be the latest one)
+                    from src.database import get_queue
+                    queue = get_queue(limit=1)
+                    if queue:
+                        restored_id = queue[0]["id"]
+
+                        # Clear the platform status and set to retry
+                        cleared = clear_platform_status(restored_id, platform_key)
+                        if cleared:
+                            from src.database import get_queue_item
+                            row = get_queue_item(restored_id)
+                            current_logs = _parse_platform_logs(row.get("platform_logs")) if row else {}
+                            update_queue_status(restored_id, "retry", None, current_logs)
+
+                            # Set force flag for this platform
+                            set_config(FORCE_KEY, 1)
+                            set_config(FORCE_PLATFORM_KEY, platform_key)
+
+                            logger.info("Restored archive #%s and queued force upload for platform: %s", archive_id, label)
+                            st.cache_data.clear()
+                            st.success(f"Restored to queue! Force {label} queued.")
+                            st.rerun()
+                        else:
+                            logger.warning("Restored but failed to clear platform status for archive #%s, platform: %s", archive_id, label)
+                            st.error("Restored but failed to queue force upload")
+                else:
+                    st.error("Failed to restore. Item may not exist.")
+            except Exception as e:
+                logger.error("Failed to restore archive #%s: %s", archive_id, e, exc_info=True)
+                st.error("Failed to restore. Please try again.")
+
+
+def render_archived_row(upload_row: dict, platforms: dict, logger):
+    """Render a single archived upload item with restore capability."""
+    # Parse platform logs to check for failures
+    logs = _parse_platform_logs(upload_row.get("platform_logs"))
+
+    # Check which platforms failed
+    has_failures = False
+    failed_platforms = []
+    success_platforms = []
+
+    for pkey, pcfg in platforms.items():
+        status = logs.get(pkey, "")
+        if status:
+            is_success = "success" in str(status).lower() or "uploaded" in str(status).lower() or "id:" in str(status).lower()
+            if is_success:
+                success_platforms.append(pcfg["label"])
+            else:
+                has_failures = True
+                failed_platforms.append(pcfg["label"])
+
+    # Build title
+    file_name = Path(upload_row['file_path']).name[:30]
+    status_icon = "⚠" if has_failures else "✓"
+    expander_title = f"{status_icon} Archive #{upload_row['id']} - {file_name}"
+
+    with st.expander(expander_title, expanded=False):
+        col_info, col_vid = st.columns([1, 1])
+
+        with col_info:
+            st.write(f"**Uploaded:** {ui_logic.format_datetime_for_ui(upload_row.get('uploaded_at'))}")
+
+            # Show custom title/description if set
+            if upload_row.get("title"):
+                st.write(f"Title: {upload_row['title'][:40]}...")
+            if upload_row.get("description"):
+                st.write(f"Desc: {upload_row['description'][:40]}...")
+
+            # Platform status section with restore buttons
+            st.markdown("**Platforms:**")
+
+            for pkey in platforms.keys():
+                if pkey in platforms:
+                    pcfg = platforms[pkey]
+                    render_archived_platform_row(
+                        upload_row["id"],
+                        pkey,
+                        pcfg["label"],
+                        upload_row.get("platform_logs"),
+                        logger,
+                    )
+
+            st.markdown("---")
+
+            # Delete button
+            if st.button("Delete Archive", key=f"del_archive_{upload_row['id']}", type="secondary"):
+                try:
+                    delete_uploaded_item(upload_row["id"])
+                    fp = Path(upload_row["file_path"])
+                    if fp.exists():
+                        fp.unlink(missing_ok=True)
+                    logger.info("Deleted archive #%s", upload_row["id"])
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    logger.error("Failed to delete archive #%s: %s", upload_row["id"], e, exc_info=True)
+                    st.error("Failed to delete. Please try again.")
+
+        with col_vid:
+            # Show video preview option
+            if st.checkbox("Show video preview", key=f"preview_archive_{upload_row['id']}", value=False):
+                file_path = Path(upload_row["file_path"])
+                if file_path.exists():
+                    try:
+                        abs_path = file_path.resolve()
+                        st.video(str(abs_path), start_time=0)
+                    except Exception as e:
+                        logger.warning("Failed to render video for archive #%s: %s", upload_row["id"], e)
+                        st.warning("⚠ Video preview unavailable")
+                else:
+                    st.error("❌ File missing")
+            else:
+                file_path = Path(upload_row["file_path"])
+                if file_path.exists():
+                    try:
+                        file_size_mb = file_path.stat().st_size / (1024 * 1024)
+                        st.info(f"📹 {file_path.name}\n\n{file_size_mb:.1f} MB")
+                    except Exception:
+                        st.info(f"📹 {file_path.name}")
+                else:
+                    st.error("❌ File missing")
+
+
+def render_archived_uploads(uploaded_rows, logger):
+    """Render archived uploads section with ability to restore failed ones."""
+    if not uploaded_rows:
+        return
+
+    st.markdown("---")
+    st.markdown("### **Archived Uploads**")
+    st.caption("Recently completed uploads (most recent first)")
+
+    platforms = get_platforms()
+
+    # Show only first 10 by default
+    display_limit = 10
+    displayed_archived = uploaded_rows[:display_limit]
+
+    for upload_row in displayed_archived:
+        render_archived_row(upload_row, platforms, logger)
