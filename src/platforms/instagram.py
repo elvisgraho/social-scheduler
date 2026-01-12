@@ -123,6 +123,21 @@ def _login(cl: Client) -> Tuple[bool, str]:
             _store_settings(cl)
             set_account_state("instagram", True, None)
             return True, "Session login successful."
+        except KeyError as exc:
+            # Known instagrapi parsing issue - session might still work, try to verify
+            if 'pinned_channels_info' in str(exc) or 'threads' in str(exc):
+                logger.debug("Instagram response parsing issue (non-critical): %s", exc)
+                # Check if we're actually logged in despite the parsing error
+                try:
+                    cl.account_info()  # Quick check if session works
+                    _store_settings(cl)
+                    set_account_state("instagram", True, None)
+                    logger.info("Session login successful (despite parsing warning)")
+                    return True, "Session login successful."
+                except Exception:
+                    logger.warning("Session verification failed, will try password login")
+            else:
+                logger.warning("Instagram sessionid login failed: %s", exc)
         except Exception as exc:
             logger.warning("Instagram sessionid login failed: %s", exc)
 

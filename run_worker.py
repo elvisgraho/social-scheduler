@@ -395,7 +395,7 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
     all_platforms_succeeded = (len(successes) == total_platforms_to_try and len(failures) == 0)
 
     if all_platforms_succeeded:
-        # Complete success
+        # Complete success - archive and remove from queue
         archive_uploaded_item(video, current_logs)
         platform_list = ", ".join(successes)
         _notify(
@@ -404,9 +404,12 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
         )
     elif has_any_success and len(failures) > 0:
         # Partial success - some platforms succeeded, some failed
-        archive_uploaded_item(video, current_logs)
+        # KEEP in queue with 'failed' status so user can manually retry failed platforms
         success_list = ", ".join(successes)
         failure_list = ", ".join([f"{label} ({msg[:30]}...)" for label, msg in failures])
+        error_msg = f"Partial: {failure_list}"
+
+        update_queue_status(queue_id, "failed", error_msg, current_logs)
 
         # Pause queue on partial failure to allow user to investigate
         set_config(PAUSE_KEY, 1)
@@ -416,10 +419,11 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
             f"Queue #{queue_id} partially uploaded\n"
             f"✓ Success: {success_list}\n"
             f"✗ Failed: {failure_list}\n"
-            f"Queue paused. Remaining: {pending_count}"
+            f"Queue paused. Use Force button to retry failed platforms. Remaining: {pending_count}"
         )
     else:
         # Complete failure - no platforms succeeded
+        # KEEP in queue with 'failed' status for manual retry
         parts = []
         if failures:
             failure_messages = [f"{label}: {msg}" for label, msg in failures]
@@ -443,7 +447,7 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
         _notify(
             f"Queue #{queue_id} upload failed on all platforms\n"
             f"Failed: {failure_summary}\n"
-            f"Queue paused. Remaining: {pending_count}"
+            f"Queue paused. Use Force button to retry. Remaining: {pending_count}"
         )
 
 
