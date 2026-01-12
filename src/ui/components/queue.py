@@ -566,43 +566,47 @@ def render_archived_platform_row(archive_id: int, platform_key: str, label: str,
     else:
         st.info(f"○ {label}: Not attempted")
 
-    # Restore button for failed/not attempted platforms
-    if not is_success:
+    # Restore button ONLY for failed platforms (not for pending/not attempted)
+    if is_failed:
         if st.button(f"Restore & Force {label}", key=f"restore_force_{archive_id}_{platform_key}", type="primary"):
-            try:
-                # Restore to queue
-                success = restore_archived_to_queue(archive_id)
-                if success:
-                    # Get the newly restored queue item (it should be the latest one)
-                    from src.database import get_queue
-                    queue = get_queue(limit=1)
-                    if queue:
-                        restored_id = queue[0]["id"]
+            with st.spinner(f"Restoring and queuing {label} upload..."):
+                try:
+                    # Restore to queue
+                    success = restore_archived_to_queue(archive_id)
+                    if success:
+                        # Get the newly restored queue item (it should be the latest one)
+                        from src.database import get_queue
+                        queue = get_queue(limit=1)
+                        if queue:
+                            restored_id = queue[0]["id"]
 
-                        # Clear the platform status and set to retry
-                        cleared = clear_platform_status(restored_id, platform_key)
-                        if cleared:
-                            from src.database import get_queue_item
-                            row = get_queue_item(restored_id)
-                            current_logs = _parse_platform_logs(row.get("platform_logs")) if row else {}
-                            update_queue_status(restored_id, "retry", None, current_logs)
+                            # Clear the platform status and set to retry
+                            cleared = clear_platform_status(restored_id, platform_key)
+                            if cleared:
+                                from src.database import get_queue_item
+                                row = get_queue_item(restored_id)
+                                current_logs = _parse_platform_logs(row.get("platform_logs")) if row else {}
+                                update_queue_status(restored_id, "retry", None, current_logs)
 
-                            # Set force flag for this platform
-                            set_config(FORCE_KEY, 1)
-                            set_config(FORCE_PLATFORM_KEY, platform_key)
+                                # Set force flag for this platform
+                                set_config(FORCE_KEY, 1)
+                                set_config(FORCE_PLATFORM_KEY, platform_key)
 
-                            logger.info("Restored archive #%s and queued force upload for platform: %s", archive_id, label)
-                            st.cache_data.clear()
-                            st.success(f"Restored to queue! Force {label} queued.")
-                            st.rerun()
-                        else:
-                            logger.warning("Restored but failed to clear platform status for archive #%s, platform: %s", archive_id, label)
-                            st.error("Restored but failed to queue force upload")
-                else:
-                    st.error("Failed to restore. Item may not exist.")
-            except Exception as e:
-                logger.error("Failed to restore archive #%s: %s", archive_id, e, exc_info=True)
-                st.error("Failed to restore. Please try again.")
+                                logger.info("Restored archive #%s and queued force upload for platform: %s", archive_id, label)
+                                st.cache_data.clear()
+                                st.success(f"✓ Restored to Queue! Worker will process {label} shortly. Check the Queue section above.")
+                                # Give user time to see the message before rerun
+                                import time
+                                time.sleep(1.5)
+                                st.rerun()
+                            else:
+                                logger.warning("Restored but failed to clear platform status for archive #%s, platform: %s", archive_id, label)
+                                st.error("Restored but failed to queue force upload")
+                    else:
+                        st.error("Failed to restore. Item may not exist.")
+                except Exception as e:
+                    logger.error("Failed to restore archive #%s: %s", archive_id, e, exc_info=True)
+                    st.error("Failed to restore. Please try again.")
 
 
 def render_archived_row(upload_row: dict, platforms: dict, logger):
