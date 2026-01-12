@@ -183,8 +183,10 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
     file_path = video["file_path"]
     forced_platforms = set(forced_platforms or [])
 
+    # Allow processing if forced, even when paused
     paused = bool(int(get_config(PAUSE_KEY, 0) or 0))
-    if paused:
+    is_forced = len(forced_platforms) > 0
+    if paused and not is_forced:
         logger.info("Queue is paused. Skipping processing for #%s.", queue_id)
         return
 

@@ -497,17 +497,18 @@ def clear_platform_status(queue_id: int, platform_key: str) -> bool:
             except (json.JSONDecodeError, TypeError):
                 logs = {}
 
-        # Clear the specific platform status
+        # Clear the specific platform status (if it exists)
         if platform_key in logs:
             del logs[platform_key]
 
-            conn.execute(
-                "UPDATE queue SET platform_logs = ? WHERE id = ?",
-                (json.dumps(logs), queue_id)
-            )
-            conn.commit()
-            return True
-        return False
+        # Always update and return True (even if key didn't exist)
+        # This allows forcing uploads for platforms that haven't been attempted yet
+        conn.execute(
+            "UPDATE queue SET platform_logs = ? WHERE id = ?",
+            (json.dumps(logs), queue_id)
+        )
+        conn.commit()
+        return True
     finally:
         conn.close()
 
