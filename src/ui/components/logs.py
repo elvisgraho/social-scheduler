@@ -20,17 +20,28 @@ def render_logs_tab():
     # Filter input on separate row
     filter_text = st.text_input("Filter", key="log_filter", placeholder="Search...")
     
+    # Initialize processing state
+    if "logs_processing" not in st.session_state:
+        st.session_state.logs_processing = {}
+    
     # Action buttons on separate row
     c_refresh, c_clear = st.columns(2)
+    
+    is_refreshing = st.session_state.logs_processing.get("refresh", False)
+    is_clearing = st.session_state.logs_processing.get("clear", False)
+    
     with c_refresh:
         if st.button("⟳ Refresh", key="logs_refresh_btn"):
             st.rerun()
+    
     with c_clear:
-        if st.button("✕ Clear", key="logs_clear_btn"):
+        if st.button("✕ Clear", key="logs_clear_btn", disabled=is_clearing):
+            st.session_state.logs_processing["clear"] = True
             if log_path.exists():
                 log_path.write_text("")
-                st.success("Cleared!")
-                st.rerun()
+                st.success("✓ Cleared!")
+            st.session_state.logs_processing["clear"] = False
+            st.rerun()
     
     # Load logs
     raw_log = tail_log(line_count) if line_count else (log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "")

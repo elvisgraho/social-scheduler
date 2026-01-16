@@ -32,11 +32,24 @@ def save_files_to_queue(
     if not isinstance(files, list):
         files = [files]
 
+    # Filter out empty files
+    valid_files = []
+    for f in files:
+        file_size = getattr(f, 'size', 0)
+        if file_size and file_size > 0:
+            valid_files.append(f)
+        else:
+            logger.warning("Skipping empty file: %s", getattr(f, 'name', 'unknown'))
+    
+    if not valid_files:
+        logger.error("No valid files to queue (all files are empty)")
+        return 0
+
     title = get_config("global_title", "Daily Short")
     desc = get_config("global_desc", "#shorts")
 
     # Zip stops at the shortest list, preventing index errors
-    paired = list(zip(files, slots))
+    paired = list(zip(valid_files, slots))
 
     if shuffle_order:
         random.shuffle(paired)
@@ -46,6 +59,7 @@ def save_files_to_queue(
     sequence = 1
 
     for uploaded_file, slot in paired:
+        destination = None
         try:
             # Validate uploaded file has required attributes
             if not hasattr(uploaded_file, 'name') or not hasattr(uploaded_file, 'getbuffer'):
@@ -59,19 +73,38 @@ def save_files_to_queue(
             while destination.exists():
                 sequence += 1
                 destination = upload_dir / f"{base_timestamp}_{sequence:02d}{ext}"
+                if sequence > 100:  # Prevent infinite loop
+                    logger.error("Could not find unique filename for file %s", uploaded_file.name)
+                    break
             sequence += 1
 
             # Write file to disk
-            with destination.open("wb") as f:
-                buffer = uploaded_file.getbuffer()
-                f.write(buffer)
+            try:
+                with destination.open("wb") as f:
+                    buffer = uploaded_file.getbuffer()
+                    if len(buffer) == 0:
+                        logger.error("File buffer is empty: %s", uploaded_file.name)
+                        continue
+                    f.write(buffer)
+            except (IOError, OSError) as e:
+                logger.error("Failed to write file %s: %s", destination, e)
+                continue
 
             # Verify file was written
-            if not destination.exists() or destination.stat().st_size == 0:
-                logger.error("File write failed or empty: %s", destination)
-                if destination.exists():
-                    destination.unlink()
+            if not destination.exists():
+                logger.error("File not found after write: %s", destination)
                 continue
+            
+            file_stat = destination.stat()
+            if file_stat.st_size == 0:
+                logger.error("File is empty after write: %s", destination)
+                destination.unlink(missing_ok=True)
+                continue
+            
+            # Check size match
+            expected_size = getattr(uploaded_file, 'size', 0)
+            if expected_size and file_stat.st_size != expected_size:
+                logger.warning("File size mismatch for %s: expected %d, got %d", uploaded_file.name, expected_size, file_stat.st_size)
 
             # Add to DB - None for enabled_platforms means all platforms enabled
             add_to_queue(str(destination), slot.isoformat(), title, desc, enabled_platforms=None)
@@ -81,7 +114,7 @@ def save_files_to_queue(
         except Exception as e:
             logger.error("Failed to save or queue file %s: %s", getattr(uploaded_file, 'name', 'unknown'), e, exc_info=True)
             # Cleanup orphan file if DB insert failed
-            if 'destination' in locals() and destination.exists():
+            if destination and destination.exists():
                 try:
                     destination.unlink()
                 except OSError:
@@ -102,10 +135,17 @@ def save_custom_video_to_queue(
     Saves a single video with custom scheduling, title, description, and platform selection.
     Returns 1 if successful, 0 otherwise.
     """
+    destination = None
     try:
         # Validate uploaded file
         if not hasattr(uploaded_file, 'name') or not hasattr(uploaded_file, 'getbuffer'):
             logger.error("Invalid file object for custom upload")
+            return 0
+        
+        # Check file size
+        file_size = getattr(uploaded_file, 'size', 0)
+        if not file_size or file_size == 0:
+            logger.error("Empty file uploaded: %s", getattr(uploaded_file, 'name', 'unknown'))
             return 0
 
         base_timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
@@ -117,18 +157,35 @@ def save_custom_video_to_queue(
         while destination.exists():
             destination = upload_dir / f"{base_timestamp}_custom_{sequence:02d}{ext}"
             sequence += 1
+            if sequence > 100:  # Prevent infinite loop
+                logger.error("Could not find unique filename for custom upload")
+                return 0
 
-        # Write file to disk
-        with destination.open("wb") as f:
-            buffer = uploaded_file.getbuffer()
-            f.write(buffer)
-
-        # Verify file was written
-        if not destination.exists() or destination.stat().st_size == 0:
-            logger.error("File write failed or empty: %s", destination)
-            if destination.exists():
-                destination.unlink()
+        # Write file to disk with explicit error handling
+        try:
+            with destination.open("wb") as f:
+                buffer = uploaded_file.getbuffer()
+                if len(buffer) == 0:
+                    logger.error("File buffer is empty for: %s", uploaded_file.name)
+                    return 0
+                f.write(buffer)
+        except (IOError, OSError) as e:
+            logger.error("Failed to write file %s: %s", destination, e)
             return 0
+
+        # Verify file was written successfully
+        if not destination.exists():
+            logger.error("File not found after write: %s", destination)
+            return 0
+        
+        file_stat = destination.stat()
+        if file_stat.st_size == 0:
+            logger.error("File is empty after write: %s", destination)
+            destination.unlink(missing_ok=True)
+            return 0
+        
+        if file_stat.st_size != file_size:
+            logger.warning("File size mismatch: expected %d, got %d", file_size, file_stat.st_size)
 
         # Convert enabled_platforms list to JSON string
         platforms_json = json.dumps(enabled_platforms) if enabled_platforms else None
@@ -148,7 +205,7 @@ def save_custom_video_to_queue(
     except Exception as e:
         logger.error("Failed to save or queue custom video %s: %s", getattr(uploaded_file, 'name', 'unknown'), e, exc_info=True)
         # Cleanup orphan file if DB insert failed
-        if 'destination' in locals() and destination.exists():
+        if destination and destination.exists():
             try:
                 destination.unlink()
             except OSError:

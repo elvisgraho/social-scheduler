@@ -9,6 +9,10 @@ from src.notifier import send_telegram_message, telegram_enabled
 def render_settings_tab(logger):
     """Render settings."""
     
+    # Initialize processing state for buttons
+    if "settings_processing" not in st.session_state:
+        st.session_state.settings_processing = {}
+    
     # Schedule
     st.markdown("### **Schedule**")
     schedule = get_schedule()
@@ -28,12 +32,16 @@ def render_settings_tab(logger):
             tz_options.insert(0, curr_tz)
         timezone = st.selectbox("Timezone", tz_options, index=tz_options.index(curr_tz))
         
-        if st.form_submit_button("Save", key="schedule_save_btn", type="primary"):
+        # Disable form submit while processing (quick save - no spinner)
+        is_processing = st.session_state.settings_processing.get("schedule_save", False)
+        if st.form_submit_button("Save", key="schedule_save_btn", type="primary", disabled=is_processing):
+            st.session_state.settings_processing["schedule_save"] = True
             p_times = [t.strip() for t in times_input.split(",") if t.strip()]
             p_days = [days_map[d] for d in selected_days]
             save_schedule(p_days, p_times, timezone)
             logger.info("Schedule saved: days=%s, times=%s, timezone=%s", p_days, p_times, timezone)
-            st.success("Saved!")
+            st.success("✓ Saved!")
+            st.session_state.settings_processing["schedule_save"] = False
             st.rerun()
     
     # Metadata
@@ -58,7 +66,10 @@ def render_settings_tab(logger):
         st.markdown("**TikTok**")
         tt_desc = st.text_area("TikTok Description Override", value=get_config("tiktok_desc_override", ""), height=60, key="tt_desc")
 
-        if st.form_submit_button("Save", key="meta_save_btn"):
+        # Disable form submit while processing (quick save - no spinner)
+        is_processing = st.session_state.settings_processing.get("meta_save", False)
+        if st.form_submit_button("Save", key="meta_save_btn", disabled=is_processing):
+            st.session_state.settings_processing["meta_save"] = True
             set_config("global_title", title)
             set_config("global_desc", desc)
 
@@ -69,7 +80,9 @@ def render_settings_tab(logger):
             set_config("tiktok_desc_override", tt_desc)
 
             logger.info("Default metadata saved: title='%s', desc='%s...'", title, desc[:50])
-            st.success("Saved!")
+            st.success("✓ Saved!")
+            st.session_state.settings_processing["meta_save"] = False
+            st.rerun()
     
     # Upload Strategy
     st.markdown("### **Upload Strategy**")
@@ -96,27 +109,44 @@ def render_settings_tab(logger):
         else:
             stage_platform = "youtube"
 
-        if st.form_submit_button("Save", key="upload_strategy_save_btn"):
+        # Disable form submit while processing (quick save - no spinner)
+        is_processing = st.session_state.settings_processing.get("upload_strategy_save", False)
+        if st.form_submit_button("Save", key="upload_strategy_save_btn", disabled=is_processing):
+            st.session_state.settings_processing["upload_strategy_save"] = True
             set_config("staged_uploads_enabled", "1" if staged_upload else "0")
             set_config("staged_upload_test_platform", stage_platform)
             logger.info("Upload strategy saved: staged=%s, test_platform=%s", staged_upload, stage_platform)
-            st.success("Saved!")
+            st.success("✓ Saved!")
+            st.session_state.settings_processing["upload_strategy_save"] = False
+            st.rerun()
 
     # Telegram
     st.markdown("### **Telegram**")
     with st.form("telegram_form"):
         bot_token = st.text_input("Bot Token", value=get_config("telegram_bot_token", ""), type="password")
         chat_id = st.text_input("Chat ID", value=get_config("telegram_chat_id", ""))
-        if st.form_submit_button("Save", key="telegram_save_btn"):
+        
+        # Disable form submit while processing (quick save - no spinner)
+        is_processing = st.session_state.settings_processing.get("telegram_save", False)
+        if st.form_submit_button("Save", key="telegram_save_btn", disabled=is_processing):
+            st.session_state.settings_processing["telegram_save"] = True
             set_config("telegram_bot_token", bot_token)
             set_config("telegram_chat_id", chat_id)
             logger.info("Telegram settings saved: bot_token_set=%s, chat_id=%s", bool(bot_token), chat_id)
-            st.success("Saved!")
+            st.success("✓ Saved!")
+            st.session_state.settings_processing["telegram_save"] = False
+            st.rerun()
     
-    if telegram_enabled() and st.button("Test", key="telegram_test_btn"):
-        send_telegram_message("Test!")
-        logger.info("Telegram test message sent")
-        st.success("Sent!")
+    # Telegram Test button (keep spinner - network call)
+    is_testing = st.session_state.settings_processing.get("telegram_test", False)
+    if telegram_enabled() and st.button("Test", key="telegram_test_btn", disabled=is_testing):
+        st.session_state.settings_processing["telegram_test"] = True
+        with st.spinner("Sending test message..."):
+            send_telegram_message("Test!")
+            logger.info("Telegram test message sent")
+            st.success("✓ Sent!")
+        st.session_state.settings_processing["telegram_test"] = False
+        st.rerun()
     
     # Backup
     st.markdown("### **Backup**")
@@ -125,13 +155,18 @@ def render_settings_tab(logger):
     
     with st.expander("Restore"):
         raw = st.text_area("Paste backup", height=80)
-        if st.button("Restore", key="restore_backup_btn"):
+        
+        # Restore button with disable state (quick operation - no spinner)
+        is_restoring = st.session_state.settings_processing.get("restore_backup", False)
+        if st.button("Restore", key="restore_backup_btn", disabled=is_restoring):
+            st.session_state.settings_processing["restore_backup"] = True
             try:
                 payload = json.loads(raw)
                 s, a = import_config(payload)
                 logger.info("Config restored: %d settings, %d accounts", s, a)
-                st.success(f"Restored {s} settings, {a} accounts")
-                st.rerun()
+                st.success(f"✓ Restored {s} settings, {a} accounts")
             except Exception as e:
                 logger.error("Config restore failed: %s", e)
                 st.error(f"Error: {e}")
+            st.session_state.settings_processing["restore_backup"] = False
+            st.rerun()

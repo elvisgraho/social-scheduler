@@ -70,9 +70,16 @@ def render_platform_status(logger):
     
     # Refresh below
     st.markdown('<div class="refresh-btn">', unsafe_allow_html=True)
-    if st.button("Refresh Status", key="refresh_status", type="secondary"):
-        with st.spinner("Checking..."):
+    
+    # Initialize refresh state
+    if "refresh_status_processing" not in st.session_state:
+        st.session_state.refresh_status_processing = False
+    
+    if st.button("Refresh Status", key="refresh_status", type="secondary", disabled=st.session_state.refresh_status_processing):
+        st.session_state.refresh_status_processing = True
+        with st.spinner("Checking platforms..."):
             refresh_platform_statuses(logger)
         logger.info("Platform statuses refreshed by user")
+        st.session_state.refresh_status_processing = False
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)

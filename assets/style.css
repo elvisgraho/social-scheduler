@@ -667,6 +667,42 @@ div[data-testid="stToast"] {
     margin-top: 0.5rem !important;
 }
 
+/* Mobile form improvements - eliminate gaps */
+@media (max-width: 768px) {
+    /* Stack all columns vertically */
+    div[class*="stColumns"] {
+        flex-direction: column !important;
+        gap: 0.35rem !important;
+    }
+    
+    div[class*="stColumns"] > div {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+    }
+    
+    /* Remove extra margin between stacked elements */
+    .stTextInput, .stTextArea, .stSelectbox, .stNumberInput, .stDateInput, .stTimeInput, .stCheckbox {
+        margin-bottom: 0.35rem !important;
+    }
+    
+    /* Compact spacing for form sections */
+    .stMarkdown {
+        margin-bottom: 0.35rem !important;
+    }
+    
+    /* Better video preview spacing */
+    .stVideo {
+        margin-bottom: 0.5rem !important;
+    }
+    
+    /* Form section containers - tighter spacing */
+    .stForm {
+        padding: 0;
+        border: none;
+    }
+}
+
 /* Multiselect */
 .stMultiSelect > div > div {
     background: var(--bg-input) !important;

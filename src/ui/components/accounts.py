@@ -20,6 +20,10 @@ from src import ui_logic
 def render_accounts_tab(logger):
     """Render platform accounts."""
     
+    # Initialize processing state for buttons
+    if "accounts_processing" not in st.session_state:
+        st.session_state.accounts_processing = {}
+    
     # YouTube
     st.markdown("### **YouTube**")
     google_config_present = has_google_client_config()
@@ -35,18 +39,25 @@ def render_accounts_tab(logger):
             height=200,
             key="google_json_input",
         )
-        if st.button("Save Google OAuth JSON"):
+        
+        # Disable button while processing (quick save - no spinner)
+        is_processing = st.session_state.accounts_processing.get("google_save", False)
+        if st.button("Save Google OAuth JSON", key="google_save_btn", disabled=is_processing):
+            st.session_state.accounts_processing["google_save"] = True
             if not google_json.strip():
                 st.warning("Paste the JSON first.")
+                st.session_state.accounts_processing["google_save"] = False
             else:
                 ok, msg = save_google_client_config(google_json.strip())
                 if ok:
                     logger.info("Google OAuth JSON saved (%s bytes).", len(google_json.strip()))
                     st.success(msg)
+                    st.session_state.accounts_processing["google_save"] = False
                     st.rerun()
                 else:
                     logger.warning("Failed to save Google OAuth JSON: %s", msg)
                     st.error(msg)
+                    st.session_state.accounts_processing["google_save"] = False
         
         yt_connected = youtube_connected()
         if google_config_present:
@@ -55,27 +66,46 @@ def render_accounts_tab(logger):
                 if not err:
                     st.link_button("Connect YouTube", auth_url)
                     yt_code = st.text_input("Auth code", key="yt_code")
-                    if st.button("Finish", key="yt_finish_btn", type="primary"):
-                        ok, message = finish_google_auth(yt_code.strip())
-                        if ok:
-                            logger.info("YouTube authentication successful")
-                            st.success("Connected!")
-                            st.rerun()
-                        else:
-                            logger.warning("YouTube authentication failed: %s", message)
-                            st.error(message)
+                    
+                    # Disable button while processing (network call - keep spinner)
+                    is_processing = st.session_state.accounts_processing.get("yt_finish", False)
+                    if st.button("Finish", key="yt_finish_btn", type="primary", disabled=is_processing):
+                        st.session_state.accounts_processing["yt_finish"] = True
+                        with st.spinner("Authenticating with YouTube..."):
+                            ok, message = finish_google_auth(yt_code.strip())
+                            if ok:
+                                logger.info("YouTube authentication successful")
+                                st.success("✓ Connected!")
+                                st.session_state.accounts_processing["yt_finish"] = False
+                                st.rerun()
+                            else:
+                                logger.warning("YouTube authentication failed: %s", message)
+                                st.error(message)
+                                st.session_state.accounts_processing["yt_finish"] = False
             else:
-                st.success("YouTube connected!")
+                st.success("✓ YouTube connected!")
                 c1, c2 = st.columns(2)
-                if c1.button("Verify", key="yt_verify_btn"):
-                    ok, msg = verify_youtube_credentials(probe_api=False)
-                    logger.info("YouTube verification: %s - %s", ok, msg)
-                    st.success(msg) if ok else st.error(msg)
-                if c2.button("Disconnect", key="yt_disconnect_btn"):
-                    logger.info("YouTube disconnected by user")
-                    auth_set_config("youtube_credentials", "")
-                    set_account_state("youtube", False, "")
-                    st.rerun()
+                
+                # Disable buttons while processing
+                is_verifying = st.session_state.accounts_processing.get("yt_verify", False)
+                is_disconnecting = st.session_state.accounts_processing.get("yt_disconnect", False)
+                
+                with c1:
+                    if st.button("Verify", key="yt_verify_btn", disabled=is_verifying):
+                        st.session_state.accounts_processing["yt_verify"] = True
+                        with st.spinner("Verifying YouTube credentials..."):
+                            ok, msg = verify_youtube_credentials(probe_api=False)
+                            logger.info("YouTube verification: %s - %s", ok, msg)
+                            st.success(msg) if ok else st.error(msg)
+                        st.session_state.accounts_processing["yt_verify"] = False
+                with c2:
+                    if st.button("Disconnect", key="yt_disconnect_btn", disabled=is_disconnecting):
+                        st.session_state.accounts_processing["yt_disconnect"] = True
+                        logger.info("YouTube disconnected by user")
+                        auth_set_config("youtube_credentials", "")
+                        set_account_state("youtube", False, "")
+                        st.session_state.accounts_processing["yt_disconnect"] = False
+                        st.rerun()
     
     # Instagram
     st.markdown("### **Instagram**")
@@ -92,28 +122,41 @@ def render_accounts_tab(logger):
         ig_pass = st.text_input("Password", type="password", key="ig_pass")
         
         c1, c2, c3 = st.columns(3)
+        
+        # Disable buttons while processing
+        is_save_session = st.session_state.accounts_processing.get("ig_save_session", False)
+        is_save_creds = st.session_state.accounts_processing.get("ig_save_creds", False)
+        is_verify = st.session_state.accounts_processing.get("ig_verify", False)
+        
         with c1:
-            if st.button("Save Session", key="ig_save_btn"):
+            if st.button("Save Session", key="ig_save_btn", disabled=is_save_session):
+                st.session_state.accounts_processing["ig_save_session"] = True
                 ok, msg = instagram_platform.save_sessionid(ig_session)
                 logger.info("Instagram session save: %s - %s", ok, msg)
                 st.success(msg) if ok else st.error(msg)
+                st.session_state.accounts_processing["ig_save_session"] = False
                 st.rerun()
         with c2:
-            if st.button("Save Credentials", key="ig_creds_btn"):
+            if st.button("Save Credentials", key="ig_creds_btn", disabled=is_save_creds):
+                st.session_state.accounts_processing["ig_save_creds"] = True
                 set_config("insta_user", ig_user)
                 set_config("insta_pass", ig_pass)
                 if ig_user and ig_pass:
                     logger.info("Instagram credentials saved")
-                    st.success("Credentials saved!")
+                    st.success("✓ Saved!")
                 else:
                     logger.info("Instagram credentials cleared")
                     st.info("Credentials cleared.")
+                st.session_state.accounts_processing["ig_save_creds"] = False
                 st.rerun()
         with c3:
-            if st.button("Verify", key="ig_verify_btn"):
-                ok, msg = instagram_platform.verify_login()
-                logger.info("Instagram verification: %s - %s", ok, msg)
-                st.success(msg) if ok else st.error(msg)
+            if st.button("Verify", key="ig_verify_btn", disabled=is_verify):
+                st.session_state.accounts_processing["ig_verify"] = True
+                with st.spinner("Verifying Instagram..."):
+                    ok, msg = instagram_platform.verify_login()
+                    logger.info("Instagram verification: %s - %s", ok, msg)
+                    st.success(msg) if ok else st.error(msg)
+                st.session_state.accounts_processing["ig_verify"] = False
     
     # TikTok
     st.markdown("### **TikTok**")
@@ -121,7 +164,7 @@ def render_accounts_tab(logger):
     tt_status = tiktok_platform.session_status()
     
     if tt_status["valid"]:
-        st.success(f"@{tt_status.get('account_name', 'user')}")
+        st.success(f"✓ @{tt_status.get('account_name', 'user')}")
     elif tt_status["sessionid"]:
         st.error(tt_status.get('message', 'Invalid'))
     else:
@@ -130,7 +173,11 @@ def render_accounts_tab(logger):
     with st.form("tiktok_form"):
         st.caption("Paste sessionid")
         tt_input = st.text_area("Session", value=get_config("tiktok_sessionid", ""), height=60, key="tt_session")
-        if st.form_submit_button("Save", key="tt_save_btn", type="primary"):
+        
+        # Disable form submit while processing
+        is_processing = st.session_state.accounts_processing.get("tt_save", False)
+        if st.form_submit_button("Save", key="tt_save_btn", type="primary", disabled=is_processing):
+            st.session_state.accounts_processing["tt_save"] = True
             raw_input = tt_input.strip()
             if "%" in raw_input:
                 try:
@@ -142,19 +189,32 @@ def render_accounts_tab(logger):
                 tiktok_platform.save_session(clean_session)
                 tiktok_platform.verify_session(force=True)
                 logger.info("TikTok session saved")
-                st.success("Saved!")
+                st.success("✓ Saved!")
+                st.session_state.accounts_processing["tt_save"] = False
                 st.rerun()
             else:
                 logger.warning("No sessionid found in TikTok input")
                 st.warning("No sessionid found")
+                st.session_state.accounts_processing["tt_save"] = False
     
     c1, c2 = st.columns(2)
-    if c1.button("Verify", key="tt_verify_btn"):
-        ok, msg = tiktok_platform.verify_session(force=True)
-        logger.info("TikTok verification: %s - %s", ok, msg)
-        st.success(msg) if ok else st.error(msg)
+    
+    # Disable buttons while processing
+    is_verify = st.session_state.accounts_processing.get("tt_verify", False)
+    is_clear = st.session_state.accounts_processing.get("tt_clear", False)
+    
+    if c1.button("Verify", key="tt_verify_btn", disabled=is_verify):
+        st.session_state.accounts_processing["tt_verify"] = True
+        with st.spinner("Verifying TikTok session..."):
+            ok, msg = tiktok_platform.verify_session(force=True)
+            logger.info("TikTok verification: %s - %s", ok, msg)
+            st.success(msg) if ok else st.error(msg)
+        st.session_state.accounts_processing["tt_verify"] = False
         st.rerun()
-    if c2.button("Clear", key="tt_clear_btn"):
+    if c2.button("Clear", key="tt_clear_btn", disabled=is_clear):
+        st.session_state.accounts_processing["tt_clear"] = True
         logger.info("TikTok session cleared by user")
         tiktok_platform.save_session("")
+        st.success("✓ Cleared!")
+        st.session_state.accounts_processing["tt_clear"] = False
         st.rerun()

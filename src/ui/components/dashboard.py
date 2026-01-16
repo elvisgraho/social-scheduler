@@ -7,6 +7,11 @@ from src import ui_logic
 
 def render_dashboard_tab(queue_rows, uploaded_count: int, logger):
     """Render minimal dashboard."""
+    
+    # Initialize processing state for buttons
+    if "dashboard_processing" not in st.session_state:
+        st.session_state.dashboard_processing = {}
+    
     # Metrics - Simple row
     pending = sum(1 for row in queue_rows if row["status"] in ("pending", "retry"))
     processing = sum(1 for row in queue_rows if row["status"] == "processing")
@@ -65,8 +70,15 @@ def render_dashboard_tab(queue_rows, uploaded_count: int, logger):
     if total_gb is not None:
         st.progress(percent / 100.0)
         st.caption(f"Used {used_gb:.1f}GB / {total_gb:.1f}GB")
-        if st.button("Clean Old Uploads", key="clean_uploaded_btn"):
+        
+        # Clean button with disable state
+        is_cleaning = st.session_state.dashboard_processing.get("clean", False)
+        if st.button("Clean Old Uploads", key="clean_uploaded_btn", disabled=is_cleaning):
+            st.session_state.dashboard_processing["clean"] = True
             deleted, freed = cleanup_uploaded(20)
             if deleted:
-                st.success(f"Deleted {deleted}, freed {freed/ (1024**2):.1f} MB")
-                st.rerun()
+                st.success(f"✓ Deleted {deleted}, freed {freed/ (1024**2):.1f} MB")
+            else:
+                st.info("No old uploads to clean")
+            st.session_state.dashboard_processing["clean"] = False
+            st.rerun()
