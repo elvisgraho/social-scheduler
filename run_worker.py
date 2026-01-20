@@ -385,17 +385,20 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
     # This includes platforms that were already successful (counted in successes list)
     total_platforms_to_try = 0
     for key, cfg in platforms.items():
+        label = cfg["label"]
         # Skip if this video has specific platforms enabled and this platform is not in the list
         if enabled_platforms_for_video is not None and key not in enabled_platforms_for_video:
             continue
         # Skip if forced platforms set and this platform not in forced list
         # BUT still count already-successful platforms
         if forced_platforms and key not in forced_platforms:
-            # Check if this platform already succeeded (would have been added to successes list)
+            # Check if this platform already succeeded
             prev_status = current_logs.get(key, "")
             if "success" in str(prev_status).lower() or "uploaded id" in str(prev_status).lower():
-                # Already successful, count it
+                # Already successful, count it AND add to successes if not already there
                 total_platforms_to_try += 1
+                if label not in successes:
+                    successes.append(label)
             # Otherwise skip (not forced and not already successful)
             continue
         if cfg["connected"]():

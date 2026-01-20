@@ -2,6 +2,7 @@ import json
 import os
 import logging
 from typing import Optional, Tuple, Dict
+from urllib.parse import urlparse, parse_qs
 
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
@@ -92,10 +93,31 @@ def get_google_auth_url() -> Tuple[Optional[str], Optional[str]]:
     return auth_url, None
 
 
+def _extract_code_from_input(input_str: str) -> str:
+    """
+    Extract auth code from input. Accepts either:
+    - Raw code (e.g., "4/0ASc3gC0vUB6sT6GV...")
+    - Full redirect URL (e.g., "http://localhost/?code=4/0ASc3gC0vUB6sT6GV...&scope=...")
+    """
+    input_str = input_str.strip()
+    # Check if it looks like a URL
+    if input_str.startswith("http://") or input_str.startswith("https://"):
+        try:
+            parsed = urlparse(input_str)
+            params = parse_qs(parsed.query)
+            if "code" in params:
+                return params["code"][0]
+        except Exception:
+            pass
+    return input_str
+
+
 def finish_google_auth(auth_code: str) -> Tuple[bool, str]:
     """
     Exchanges the Auth Code (pasted by user) for a Refresh Token.
+    Accepts either the raw code or the full redirect URL.
     """
+    auth_code = _extract_code_from_input(auth_code)
     try:
         flow = _build_flow()
         flow.fetch_token(code=auth_code)

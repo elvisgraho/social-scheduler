@@ -3,7 +3,7 @@ import streamlit as st
 import pytz
 from pathlib import Path
 from datetime import datetime, timedelta
-from src.database import clear_platform_status, delete_from_queue, reschedule_queue_item, update_queue_status, get_queue_item, set_config, get_config, restore_archived_to_queue, delete_uploaded_item
+from src.database import clear_platform_status, delete_from_queue, reschedule_queue_item, update_queue_status, get_queue_item, set_config, get_config, restore_archived_to_queue, delete_uploaded_item, get_uploaded_items
 from src.scheduling import next_daily_slots, get_schedule
 from src.platform_registry import get_platforms
 from src import ui_logic
@@ -17,11 +17,6 @@ def render_calendar_view(queue_rows):
     """Render a calendar view of scheduled uploads with gap detection."""
     st.markdown("### **Calendar View**")
 
-    # Early return if no data to reduce rendering overhead
-    if not queue_rows:
-        st.info("No scheduled uploads to display")
-        return
-
     # Get schedule config for timezone consistency
     schedule = get_schedule()
     tz = pytz.timezone(schedule.get("timezone", "UTC"))
@@ -30,9 +25,9 @@ def render_calendar_view(queue_rows):
     # Use schedule timezone for today to match scheduled dates
     today = datetime.now(tz).date()
 
-    # Parse scheduled dates using timezone-aware comparison
+    # Parse scheduled dates from queue (pending uploads)
     scheduled_dates = {}
-    for row in queue_rows:
+    for row in queue_rows or []:
         if row.get("status") in ("pending", "retry", "processing"):
             scheduled_for = row.get("scheduled_for")
             if scheduled_for:
@@ -49,7 +44,21 @@ def render_calendar_view(queue_rows):
                 except Exception:
                     pass
 
-    if not scheduled_dates:
+    # Also include already-uploaded items (from uploads table)
+    uploaded_dates = set()
+    for row in get_uploaded_items(limit=10):
+        uploaded_at = row.get("uploaded_at")
+        if uploaded_at:
+            try:
+                dt = ui_logic.parse_iso(uploaded_at)
+                if dt:
+                    if dt.tzinfo:
+                        dt = dt.astimezone(tz)
+                    uploaded_dates.add(dt.date().isoformat())
+            except Exception:
+                pass
+
+    if not scheduled_dates and not uploaded_dates:
         st.info("No scheduled uploads to display")
         return
 
@@ -66,14 +75,20 @@ def render_calendar_view(queue_rows):
         day = today + timedelta(days=i)
         date_key = day.isoformat()
         is_scheduled_day = day.weekday() in enabled_weekdays
-        has_upload = date_key in scheduled_dates
+        has_pending = date_key in scheduled_dates
+        has_uploaded = date_key in uploaded_dates
         is_today = day == today
 
         # Determine CSS class and content
-        if has_upload:
+        if has_pending or has_uploaded:
             day_class = "calendar-day has-upload"
-            count = len(scheduled_dates[date_key])
-            content = f"✓ {count}"
+            pending_count = len(scheduled_dates.get(date_key, []))
+            if has_pending and has_uploaded:
+                content = f"✓ {pending_count}+"
+            elif has_pending:
+                content = f"✓ {pending_count}"
+            else:
+                content = "✓"
         elif is_scheduled_day:
             day_class = "calendar-day gap-day"
             content = "⚠"

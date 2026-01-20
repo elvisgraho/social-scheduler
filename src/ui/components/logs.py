@@ -12,8 +12,8 @@ def render_logs_tab():
     # Line count selector
     line_count = st.selectbox(
         "Lines",
-        options=[20, 50, 100],
-        index=0,
+        options=[50, 100, 200],
+        index=200,
         key="log_lines_select"
     )
     
