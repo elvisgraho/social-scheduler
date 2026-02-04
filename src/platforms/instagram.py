@@ -13,35 +13,11 @@ from src.database import get_config, set_account_state, set_config
 
 SESSION_KEY = "insta_session"
 SESSION_ID_KEY = "insta_sessionid"
+
+# Updated User-Agent to version 410 with German locale (de_DE) to match your IP
+IG_USER_AGENT = "Instagram 410.1.0.63.71 Android (34/14; 320dpi; 720x1438; Xiaomi/Redmi; 23108RN04Y; gust; mt6768; de_DE; 846519237)"
+
 logger = init_logging("instagram")
-
-# --- ADDED: Stealth Configuration (Samsung S23 Ultra / Germany) ---
-IG_VERSION = "318.0.0.26.109"
-ANDROID_VERSION = 34
-ANDROID_RELEASE = "14"
-VERSION_CODE = "573679152"
-MANUFACTURER = "Samsung"
-MODEL = "SM-S918B"
-
-EU_DEVICE_SETTINGS = {
-    "app_version": IG_VERSION,
-    "android_version": ANDROID_VERSION,
-    "android_release": ANDROID_RELEASE,
-    "dpi": "480dpi",
-    "resolution": "1440x3088",
-    "manufacturer": MANUFACTURER,
-    "device": "dm3q",
-    "model": MODEL,
-    "cpu": "qcom",
-    "version_code": VERSION_CODE
-}
-
-EU_USER_AGENT = (
-    f"Instagram {IG_VERSION} Android "
-    f"({ANDROID_VERSION}/{ANDROID_RELEASE}; 480dpi; 1440x3088; "
-    f"{MANUFACTURER}; {MODEL}; dm3q; qcom; de_DE; {VERSION_CODE})"
-)
-# ------------------------------------------------------------------
 
 def _credentials() -> Tuple[str, str]:
     return get_config("insta_user"), get_config("insta_pass")
@@ -84,6 +60,14 @@ def _extract_sessionid(raw: str) -> str:
                         return str(cookie.get("value", "")).strip()
     return raw
 
+def _apply_german_settings(cl: Client) -> None:
+    """Enforce Germany (Hessen) settings to match IP and avoid challenges."""
+    cl.set_user_agent(IG_USER_AGENT)
+    cl.set_country("DE")
+    cl.set_country_code(49)
+    cl.set_locale("de_DE")
+    cl.set_timezone_offset(3600)  # UTC+1 (Winter Time)
+
 def _load_settings(cl: Client) -> bool:
     """Load saved session settings including device UUIDs."""
     session_data = get_config(SESSION_KEY)
@@ -91,6 +75,8 @@ def _load_settings(cl: Client) -> bool:
         try:
             settings = json.loads(session_data)
             cl.set_settings(settings)
+            # Overwrite locale settings to ensure they match current location (Germany)
+            _apply_german_settings(cl)
             logger.debug("Loaded saved Instagram session settings")
             return True
         except Exception:
@@ -98,19 +84,11 @@ def _load_settings(cl: Client) -> bool:
     return False
 
 def _initialize_client() -> Client:
-    """Initialize client with proper delays."""
+    """Initialize client with proper delays and location settings."""
     cl = Client()
-    
-    # --- MODIFIED: Apply Stealth Settings for Pi/Germany ---
-    cl.set_device(EU_DEVICE_SETTINGS)
-    cl.set_user_agent(EU_USER_AGENT)
-    cl.set_locale("de_DE")
-    cl.set_country("DE")
-    cl.set_timezone_offset(3600) # UTC+1 (Germany)
-    # -----------------------------------------------------
-
     # Delay between requests (1-3 seconds as recommended by instagrapi docs)
     cl.delay_range = [1, 3]
+    _apply_german_settings(cl)
     return cl
 
 def _store_settings(cl: Client) -> None:
