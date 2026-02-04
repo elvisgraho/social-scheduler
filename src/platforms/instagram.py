@@ -15,6 +15,34 @@ SESSION_KEY = "insta_session"
 SESSION_ID_KEY = "insta_sessionid"
 logger = init_logging("instagram")
 
+# --- ADDED: Stealth Configuration (Samsung S23 Ultra / Germany) ---
+IG_VERSION = "318.0.0.26.109"
+ANDROID_VERSION = 34
+ANDROID_RELEASE = "14"
+VERSION_CODE = "573679152"
+MANUFACTURER = "Samsung"
+MODEL = "SM-S918B"
+
+EU_DEVICE_SETTINGS = {
+    "app_version": IG_VERSION,
+    "android_version": ANDROID_VERSION,
+    "android_release": ANDROID_RELEASE,
+    "dpi": "480dpi",
+    "resolution": "1440x3088",
+    "manufacturer": MANUFACTURER,
+    "device": "dm3q",
+    "model": MODEL,
+    "cpu": "qcom",
+    "version_code": VERSION_CODE
+}
+
+EU_USER_AGENT = (
+    f"Instagram {IG_VERSION} Android "
+    f"({ANDROID_VERSION}/{ANDROID_RELEASE}; 480dpi; 1440x3088; "
+    f"{MANUFACTURER}; {MODEL}; dm3q; qcom; de_DE; {VERSION_CODE})"
+)
+# ------------------------------------------------------------------
+
 def _credentials() -> Tuple[str, str]:
     return get_config("insta_user"), get_config("insta_pass")
 
@@ -72,6 +100,15 @@ def _load_settings(cl: Client) -> bool:
 def _initialize_client() -> Client:
     """Initialize client with proper delays."""
     cl = Client()
+    
+    # --- MODIFIED: Apply Stealth Settings for Pi/Germany ---
+    cl.set_device(EU_DEVICE_SETTINGS)
+    cl.set_user_agent(EU_USER_AGENT)
+    cl.set_locale("de_DE")
+    cl.set_country("DE")
+    cl.set_timezone_offset(3600) # UTC+1 (Germany)
+    # -----------------------------------------------------
+
     # Delay between requests (1-3 seconds as recommended by instagrapi docs)
     cl.delay_range = [1, 3]
     return cl
