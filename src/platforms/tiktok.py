@@ -1,34 +1,45 @@
+"""
+TikTok platform upload module using Selenium automation.
+
+Supports both headless (server) and visible (local) modes with
+session-based authentication and robust error handling.
+"""
+
+import logging
+import mimetypes
 import os
 import sys
 import time
-import mimetypes
-import requests
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict, Optional, Tuple
+from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
+from pathlib import Path
+from typing import Dict
+from typing import Optional
+from typing import Tuple
 
-# Selenium Imports
+import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    NoSuchElementException
-)
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import NoSuchElementException
 
-# 1. Get the absolute path of the folder containing THIS file (tiktok.py)
+# Add current directory to path for local imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
-# 2. Add this folder to Python's search list if it's not already there
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-from tiktok_selenium_utils import dismiss_shadow_cookies, handle_are_you_sure_exit, handle_continue_to_post, handle_standard_popups
+from tiktok_selenium_utils import (
+    dismiss_shadow_cookies,
+    handle_are_you_sure_exit,
+    handle_continue_to_post,
+    handle_standard_popups,
+)
 
 # --- HYBRID IMPORT SYSTEM (Server vs Local) ---
 try:
@@ -46,16 +57,24 @@ except ImportError:
     # Fallback for Local Testing
     print("!!! RUNNING IN LOCAL / VISIBLE MODE !!!")
     IS_LOCAL = True
-    import logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
     logger = logging.getLogger("tiktok_local")
-    
+
     # Mock database functions
-    def get_config(key, default=None): return default
-    def get_json_config(key, default=None): return default
-    def set_config(key, value): pass
-    def set_json_config(key, value): pass
-    def set_account_state(platform, status, msg): print(f"SET STATE: {platform} -> {status} ({msg})")
+    def get_config(key, default=None):  # noqa: ARG001
+        return default
+
+    def get_json_config(key, default=None):  # noqa: ARG001
+        return default
+
+    def set_config(key, value):  # noqa: ARG001
+        pass
+
+    def set_json_config(key, value):  # noqa: ARG001
+        pass
+
+    def set_account_state(platform, status, msg):  # noqa: ARG001
+        print(f"SET STATE: {platform} -> {status} ({msg})")
 
 # --- CONFIGURATION ---
 SESSION_KEY = "tiktok_session_bundle"
@@ -407,29 +426,49 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                 actions.send_keys(Keys.BACKSPACE).pause(0.5)
                 actions.perform()
 
-                # 2. Type description word-by-word to trigger Hashtags
-                # FIXED: Use DOWN+ENTER to properly select from TikTok's autocomplete dropdown
+                # 2. Type description with improved hashtag handling
                 parts = description.split(' ')
                 for part in parts:
                     actions = ActionChains(driver)
 
                     if part.startswith('#'):
-                        # Hashtag logic: Type -> Wait for dropdown -> DOWN to select -> ENTER to confirm
-                        actions.send_keys(part)
-                        actions.pause(3)  # Wait for TikTok autocomplete dropdown
-                        actions.send_keys(Keys.DOWN)  # Select first suggestion
+                        # Extract the clean tag name (without #)
+                        clean_tag = part[1:].lower()
+                        _browser_log(driver, f"Processing hashtag: #{clean_tag}")
+                        
+                        # Type the hashtag character by character for better autocomplete triggering
+                        actions.send_keys('#')
+                        actions.pause(0.3)
+                        
+                        # Type tag characters one by one (triggers better autocomplete)
+                        for char in clean_tag:
+                            actions.send_keys(char)
+                            actions.pause(0.1)
+                        
+                        actions.pause(2)  # Wait for TikTok autocomplete dropdown
+                        
+                        # Smart tag selection: Try to find exact match in dropdown
+                        # Press DOWN multiple times to find better matches (TikTok often puts
+                        # trending/irrelevant tags first, relevant ones lower)
+                        tag_found = _select_best_hashtag(driver, clean_tag, actions)
+                        
+                        if tag_found:
+                            _browser_log(driver, f"Hashtag #{clean_tag} selected successfully")
+                        else:
+                            _browser_log(driver, f"Hashtag #{clean_tag} - using best available suggestion")
+                        
                         actions.pause(0.5)
-                        actions.send_keys(Keys.ENTER)  # Confirm selection
-                        actions.pause(1)  # Wait for tag to register
+                        actions.send_keys(' ')  # Add space after tag
+                        actions.perform()
                     else:
                         # Normal word logic
                         actions.send_keys(part + " ")
-
-                    actions.perform()
-                    time.sleep(0.1) # Human-like typing speed
+                        actions.perform()
+                    
+                    time.sleep(0.15)  # Human-like typing speed
 
                 _browser_log(driver, "Description entered. Waiting 3s for save...")
-                time.sleep(3) # Critical wait for Auto-Save
+                time.sleep(3)  # Critical wait for Auto-Save
                     
             except Exception as e:
                 logger.warning(f"Caption failed: {e}")
@@ -440,7 +479,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         for _ in range(POST_BUTTON_TIMEOUT):
             try:
                 if handle_continue_to_post(driver, _browser_log):
-                    time.sleep(1) 
+                    time.sleep(1)
                     continue
 
                 # Use Robust Selector (data-e2e)
@@ -454,7 +493,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                         
                         # Scroll Center (Safe)
                         driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", post_btn)
-                        time.sleep(1.5) 
+                        time.sleep(1.5)
                         
                         # Last check for modals before clicking
                         if handle_continue_to_post(driver, _browser_log):
@@ -532,6 +571,76 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                         driver.service.process.kill()
                 except Exception:
                     pass
+
+
+def _select_best_hashtag(driver, target_tag: str, actions: ActionChains, max_attempts: int = 5) -> bool:
+    """
+    Intelligently select the best matching hashtag from TikTok's dropdown.
+    
+    Strategy:
+    1. First try to find an exact match by cycling through options
+    2. If no exact match, accept the closest partial match
+    3. Fall back to first suggestion if nothing matches
+    
+    Args:
+        driver: Selenium WebDriver instance
+        target_tag: The hashtag text without # prefix
+        actions: ActionChains instance for keyboard input
+        max_attempts: Maximum dropdown items to check
+        
+    Returns:
+        True if a good match was found, False otherwise
+    """
+    try:
+        # Wait for dropdown to appear
+        time.sleep(1.5)
+        
+        # Try to find dropdown items
+        dropdown_items = driver.find_elements(
+            By.XPATH,
+            "//div[contains(@class, 'tiktok-tag') or contains(@data-e2e, 'suggest') or contains(@class, 'suggest')]"
+        )
+        
+        if not dropdown_items:
+            # Fallback: Just press DOWN and ENTER (original behavior)
+            actions.send_keys(Keys.DOWN)
+            actions.pause(0.3)
+            actions.send_keys(Keys.ENTER)
+            return False
+        
+        # Search for best match in dropdown
+        best_match_index = 0
+        found_exact = False
+        
+        for i, item in enumerate(dropdown_items[:max_attempts]):
+            try:
+                item_text = item.text.lower().strip()
+                # Check for exact match (tag text without #)
+                if item_text == target_tag or item_text == f'#{target_tag}':
+                    best_match_index = i
+                    found_exact = True
+                    break
+                # Check for partial match (contains target)
+                elif target_tag in item_text and not found_exact:
+                    best_match_index = i
+            except Exception:
+                continue
+        
+        # Navigate to the best match
+        for _ in range(best_match_index):
+            actions.send_keys(Keys.DOWN)
+            actions.pause(0.2)
+        
+        actions.send_keys(Keys.ENTER)
+        return found_exact
+        
+    except Exception as e:
+        logger.debug(f"Hashtag dropdown selection failed: {e}, using fallback")
+        # Fallback: Simple DOWN + ENTER
+        actions.send_keys(Keys.DOWN)
+        actions.pause(0.3)
+        actions.send_keys(Keys.ENTER)
+        return False
 
 # --- LOCAL TESTING BLOCK ---
 if __name__ == "__main__":

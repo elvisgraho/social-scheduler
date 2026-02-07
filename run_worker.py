@@ -1,40 +1,51 @@
+"""
+Background worker for processing the upload queue.
+
+Handles scheduled video uploads to multiple platforms (YouTube, Instagram, TikTok)
+with retry logic, platform shuffling, and token verification.
+"""
+
 import json
 import os
+import random
 import time
-import random 
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime
+from datetime import time as dtime
+from datetime import timedelta
 
 import pytz
 import schedule
 
+from src.auth_utils import verify_youtube_credentials
 from src.database import (
+    archive_uploaded_item,
     get_config,
     get_due_queue,
     get_queue,
     increment_attempts,
     init_db,
+    reschedule_queue_item,
     set_config,
     update_queue_status,
-    reschedule_queue_item,
-    archive_uploaded_item,
 )
-from src.logging_utils import init_logging, log_once
+from src.logging_utils import init_logging
+from src.logging_utils import log_once
 from src.notifier import send_telegram_message
 from src.platform_registry import get_platforms
-from src.auth_utils import verify_youtube_credentials
 from src.platforms import instagram as instagram_platform
 from src.platforms import tiktok as tiktok_platform
-from src.scheduling import get_schedule, next_daily_slots
+from src.scheduling import get_schedule
+from src.scheduling import next_daily_slots
 
 logger = init_logging("worker")
 
+# State keys
 WORKER_BUSY = False
 PAUSE_KEY = "queue_paused"
 FORCE_KEY = "queue_force_run"
 FORCE_PLATFORM_KEY = "queue_force_platform"
 FORCE_QUEUE_ID_KEY = "queue_force_id"
 TOKEN_CHECK_KEY = "last_token_check_date"
-# Note: TOKEN_CHECK_TIME is no longer used (now uses 6-10 AM window for randomness)
 
 
 def _now_with_timezone() -> datetime:
