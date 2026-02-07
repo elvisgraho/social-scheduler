@@ -4,7 +4,7 @@ TikTok platform upload module using Selenium automation.
 Supports both headless (server) and visible (local) modes with
 session-based authentication and robust error handling.
 """
-
+import requests
 import logging
 import mimetypes
 import os
@@ -17,8 +17,6 @@ from pathlib import Path
 from typing import Dict
 from typing import Optional
 from typing import Tuple
-
-import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -98,9 +96,17 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
-    if not value: return None
-    try: return datetime.fromisoformat(value)
-    except Exception: return None
+    """Parse ISO string to timezone-aware datetime."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        # If naive datetime, assume UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
 
 def _session_bundle() -> Dict:
     data = get_json_config(SESSION_KEY, {})
