@@ -1,3 +1,4 @@
+import logging
 import math
 from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional
@@ -5,6 +6,8 @@ from typing import Dict, List, Optional
 import pytz
 
 from src.database import get_json_config, set_json_config
+
+logger = logging.getLogger("scheduling")
 
 DEFAULT_SCHEDULE = {
     "days": list(range(7)),  # 0=Mon
@@ -70,12 +73,18 @@ def next_slots(count: int, start: Optional[datetime] = None) -> List[datetime]:
         now = datetime.now(tz)
     slots: List[datetime] = []
 
+    # Validate we have valid days configured
+    valid_days = cfg.get("days", [])
+    if not valid_days:
+        logger.warning("No valid days configured in schedule, defaulting to all days")
+        valid_days = list(range(7))
+
     # limit search to next 90 days to avoid infinite loops
     day_offset = 0
     while len(slots) < count and day_offset < 90:
         candidate_date = (now + timedelta(days=day_offset)).date()
         weekday = candidate_date.weekday()
-        if weekday in cfg["days"]:
+        if weekday in valid_days:
             for ts in cfg["times"]:
                 dt = tz.localize(datetime.combine(candidate_date, _parse_time(ts)))
                 if dt <= now:
@@ -101,13 +110,19 @@ def next_daily_slots(
     tz = pytz.timezone(cfg["timezone"])
     now = datetime.now(tz) if start is None else (start if start.tzinfo else tz.localize(start)).astimezone(tz)
 
+    # Validate we have valid days configured
+    valid_days = cfg.get("days", [])
+    if not valid_days:
+        logger.warning("No valid days configured in schedule, defaulting to all days")
+        valid_days = list(range(7))
+
     slots: List[datetime] = []
     day_offset = 0
     while len(slots) < count and day_offset < 90:
         candidate_date = (now + timedelta(days=day_offset)).date()
         weekday = candidate_date.weekday()
         day_key = candidate_date.isoformat()
-        if weekday in cfg["days"] and day_key not in occupied_dates:
+        if weekday in valid_days and day_key not in occupied_dates:
             for ts in cfg["times"]:
                 dt = tz.localize(datetime.combine(candidate_date, _parse_time(ts)))
                 if dt <= now:

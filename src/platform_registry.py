@@ -15,7 +15,10 @@ def _instagram_connected() -> bool:
 
 
 def _tiktok_connected() -> bool:
-    return platforms.tiktok.session_connected()
+    try:
+        return platforms.tiktok.session_connected()
+    except Exception:
+        return False
 
 
 PLATFORMS: Dict[str, Dict] = {

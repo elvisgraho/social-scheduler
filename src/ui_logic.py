@@ -12,6 +12,7 @@ from src.ui_logic.scheduling_utils import (
 )
 from src.ui_logic.file_utils import (
     save_files_to_queue,
+    save_custom_video_to_queue,
     extract_tiktok_session,
     get_storage_summary,
     format_queue_dataframe,
@@ -26,6 +27,7 @@ __all__ = [
     "shuffle_queue",
     "reschedule_pending_items",
     "save_files_to_queue",
+    "save_custom_video_to_queue",
     "extract_tiktok_session",
     "get_storage_summary",
     "format_queue_dataframe",

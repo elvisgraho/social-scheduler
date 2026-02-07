@@ -3,6 +3,7 @@ import os
 import sqlite3
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from datetime import timezone
 
 DB_FILE = "data/scheduler.db"
 
@@ -288,6 +289,20 @@ def update_queue_status(
     last_error: Optional[str] = None,
     platform_logs: Optional[Dict[str, Any]] = None,
 ) -> None:
+    # Handle platform_logs - avoid double-encoding if already a string
+    logs_json = "{}"
+    if platform_logs:
+        if isinstance(platform_logs, str):
+            # Already a JSON string, use as-is (validate it's valid JSON)
+            try:
+                json.loads(platform_logs)
+                logs_json = platform_logs
+            except json.JSONDecodeError:
+                # Invalid JSON, use empty object
+                logs_json = "{}"
+        elif isinstance(platform_logs, dict):
+            logs_json = json.dumps(platform_logs)
+    
     conn = get_conn()
     conn.execute(
         """
@@ -298,7 +313,7 @@ def update_queue_status(
         (
             status,
             last_error,
-            json.dumps(platform_logs or {}),
+            logs_json,
             queue_id,
         ),
     )
@@ -389,7 +404,7 @@ def archive_uploaded_item(queue_row: Dict[str, Any], platform_logs: Optional[Dic
     """
     conn = get_conn()
     logs_json = json.dumps(platform_logs or {})
-    uploaded_at = datetime.utcnow().isoformat()
+    uploaded_at = datetime.now(timezone.utc).isoformat()
     try:
         conn.execute(
             """
@@ -513,22 +528,22 @@ def clear_platform_status(queue_id: int, platform_key: str) -> bool:
         conn.close()
 
 
-def restore_archived_to_queue(upload_id: int) -> bool:
+def restore_archived_to_queue(upload_id: int) -> int:
     """
     Restore an archived upload back to the queue with 'failed' status.
-    Returns True if successful, False otherwise.
+    Returns the new queue item ID if successful, 0 otherwise.
     """
     conn = get_conn()
     try:
         # Get the archived upload
         row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
         if not row:
-            return False
+            return 0
 
         upload_dict = dict(row)
 
         # Insert back into queue with 'failed' status
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO queue (file_path, scheduled_for, title, description, platform_logs, status, attempts)
             VALUES (?, ?, ?, ?, ?, 'failed', 0)
@@ -541,13 +556,14 @@ def restore_archived_to_queue(upload_id: int) -> bool:
                 upload_dict.get("platform_logs"),
             ),
         )
+        new_queue_id = cursor.lastrowid
 
         # Delete from uploads table
         conn.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
         conn.commit()
-        return True
+        return new_queue_id
     except Exception:
         conn.rollback()
-        return False
+        return 0
     finally:
         conn.close()

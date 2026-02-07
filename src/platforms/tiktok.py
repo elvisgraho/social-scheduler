@@ -6,6 +6,7 @@ import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+from datetime import timezone
 
 # Selenium Imports
 from selenium import webdriver
@@ -75,7 +76,7 @@ SUPPORTED_VIDEO_FORMATS = {'.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv', '.wm
 
 # --- HELPER FUNCTIONS ---
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
     if not value: return None
@@ -521,9 +522,14 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                 logger.debug("WebDriver closed successfully")
             except Exception as quit_err:
                 logger.warning(f"Failed to quit WebDriver cleanly: {quit_err}")
-                # Force kill if normal quit fails
+                # Force kill if normal quit fails - try multiple approaches
                 try:
-                    driver.service.process.kill()
+                    driver.service.stop()
+                except Exception:
+                    pass
+                try:
+                    if hasattr(driver, 'service') and hasattr(driver.service, 'process'):
+                        driver.service.process.kill()
                 except Exception:
                     pass
 

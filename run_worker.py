@@ -32,6 +32,7 @@ WORKER_BUSY = False
 PAUSE_KEY = "queue_paused"
 FORCE_KEY = "queue_force_run"
 FORCE_PLATFORM_KEY = "queue_force_platform"
+FORCE_QUEUE_ID_KEY = "queue_force_id"
 TOKEN_CHECK_KEY = "last_token_check_date"
 # Note: TOKEN_CHECK_TIME is no longer used (now uses 6-10 AM window for randomness)
 
@@ -104,17 +105,23 @@ def _maybe_verify_tokens(now: datetime) -> None:
         last_run = get_config(TOKEN_CHECK_KEY)
 
         # Check if we already ran today - prevents multiple runs in same day
-        if last_run and last_run == now.date().isoformat():
+        today_str = now.date().isoformat()
+        if last_run and last_run == today_str:
             return
 
         # Check if 7 days have passed since last check
         if last_run:
-            from datetime import datetime as dt
-            last_check = dt.fromisoformat(last_run).date()
-            days_since = (now.date() - last_check).days
-            # Only run once per week (7 days minimum)
-            if days_since < 7:
-                return
+            try:
+                # last_run is stored as a date string (YYYY-MM-DD), parse it directly
+                last_check = datetime.strptime(last_run, "%Y-%m-%d").date()
+                days_since = (now.date() - last_check).days
+                # Only run once per week (7 days minimum)
+                if days_since < 7:
+                    return
+            except (ValueError, TypeError):
+                # Invalid date format, proceed with check
+                logger.warning("Invalid token check date format: %s, proceeding with check", last_run)
+                pass
 
         # Add randomness: only run checks between 6 AM and 10 AM (not exactly 8 AM)
         if not (dtime(hour=6, minute=0) <= now.time() <= dtime(hour=10, minute=0)):
@@ -170,12 +177,23 @@ def reset_stale_tasks():
         stale_tasks = [r for r in all_items if r["status"] == "processing"]
         
         if stale_tasks:
-            logger.warning(f"Found {len(stale_tasks)} stale 'processing' tasks on startup. Resetting to 'pending'.")
+            logger.warning("Found %d stale 'processing' tasks on startup. Resetting to 'pending'.", len(stale_tasks))
             for task in stale_tasks:
+                # Parse existing logs to avoid double-encoding
+                raw_logs = task.get("platform_logs")
+                existing_logs = {}
+                if raw_logs:
+                    if isinstance(raw_logs, str):
+                        try:
+                            existing_logs = json.loads(raw_logs)
+                        except json.JSONDecodeError:
+                            existing_logs = {}
+                    elif isinstance(raw_logs, dict):
+                        existing_logs = raw_logs
                 # Keep logs, just reset status so it tries again
-                update_queue_status(task["id"], "pending", None, task.get("platform_logs"))
+                update_queue_status(task["id"], "pending", None, existing_logs)
     except Exception as e:
-        logger.error(f"Failed to reset stale tasks: {e}")
+        logger.error("Failed to reset stale tasks: %s", e)
 
 
 def process_video(video: dict, forced_platforms: set[str] | None = None) -> None:
@@ -481,6 +499,7 @@ def check_and_post():
     paused = bool(int(get_config(PAUSE_KEY, 0) or 0))
     force = bool(int(get_config(FORCE_KEY, 0) or 0))
     force_platform = (get_config(FORCE_PLATFORM_KEY, "") or "").strip()
+    force_queue_id = get_config(FORCE_QUEUE_ID_KEY, "")
     if force_platform and force_platform not in get_platforms():
         force_platform = ""
     if paused and not force:
@@ -489,26 +508,48 @@ def check_and_post():
 
     WORKER_BUSY = True
     try:
-        due = get_due_queue(now.isoformat())
-        if not due and force:
-            # If forcing and nothing is strictly due, pick the earliest pending/retry
+        due = []
+        
+        # If forcing a specific queue item, fetch only that item
+        if force and force_queue_id:
+            try:
+                force_id = int(force_queue_id)
+                from src.database import get_queue_item
+                specific_item = get_queue_item(force_id)
+                if specific_item:
+                    due = [specific_item]
+                    logger.info("Force processing specific queue item #%s", force_id)
+                else:
+                    logger.warning("Force queue item #%s not found", force_id)
+            except (ValueError, TypeError):
+                logger.warning("Invalid force_queue_id: %s", force_queue_id)
+        
+        # Normal scheduling: get due items
+        if not due and not force:
+            due = get_due_queue(now.isoformat())
+        
+        # If forcing but no specific item found, fall back to earliest pending
+        if not due and force and not force_queue_id:
             pending = [row for row in get_queue(limit=200) if row.get("status") in ("pending", "retry")]
             due = pending[:1] if pending else []
+        
+        # Clear force flags
         if force:
             set_config(FORCE_KEY, 0)
             set_config(FORCE_PLATFORM_KEY, "")
+            set_config(FORCE_QUEUE_ID_KEY, "")
 
         if not due:
             logger.debug("No videos due at %s", now.isoformat())
             return
 
         for video in due:
-            # Check if status is still pending (in case of race conditions if multiple workers exist)
+            # Check if status is still pending/retry (in case of race conditions)
             if video.get('status') not in ('pending', 'retry'):
                 continue
 
             logger.info("Processing queue item %s.", video["id"])
-            platforms_to_run = {force_platform} if force_platform else None
+            platforms_to_run = {force_platform} if force_platform and force else None
             process_video(video, platforms_to_run)
             
             # Add delay between different videos too

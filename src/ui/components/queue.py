@@ -10,6 +10,7 @@ from src import ui_logic
 
 FORCE_KEY = "queue_force_run"
 FORCE_PLATFORM_KEY = "queue_force_platform"
+FORCE_QUEUE_ID_KEY = "queue_force_id"
 
 
 @st.fragment
@@ -169,9 +170,10 @@ def render_platform_status_row(row_id: int, platform_key: str, label: str, log_v
                 current_logs = _parse_platform_logs(row.get("platform_logs")) if row else {}
                 update_queue_status(row_id, "retry", None, current_logs)
                 
-                # Set force flag for this platform
+                # Set force flag for this specific queue item and platform
                 set_config(FORCE_KEY, 1)
                 set_config(FORCE_PLATFORM_KEY, platform_key)
+                set_config(FORCE_QUEUE_ID_KEY, row_id)
                 logger.info("Manual force upload triggered for queue #%s, platform: %s", row_id, label)
                 st.success(f"✓ Force {label} queued!")
                 st.rerun()
@@ -190,9 +192,6 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
     # Initialize processing state for buttons
     if "queue_processing" not in st.session_state:
         st.session_state.queue_processing = {}
-
-    # Track if we need to rerun (avoid unnecessary reruns)
-    needs_rerun = False
 
     # Calendar view at top
     with st.expander("📅 Calendar View", expanded=False):
@@ -261,69 +260,8 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
         if not isinstance(uploaded_files, list):
             uploaded_files = [uploaded_files]
 
-        # Single video = custom scheduling mode
+        # Single video = choice between custom scheduling and regular queue
         if len(uploaded_files) == 1:
-            st.markdown("**Custom Video Settings**")
-
-            # Platform selection - use 2 columns that stack better on mobile
-            st.markdown("**Select Platforms:**")
-            platforms = get_platforms()
-            platform_cols = st.columns([1, 1])
-            enabled_platforms = []
-            
-            # Distribute platforms evenly
-            platform_list = list(platforms.keys())
-            for i, pkey in enumerate(platform_list):
-                col = platform_cols[i % 2]
-                with col:
-                    label = platforms[pkey]["label"]
-                    if st.checkbox(label, value=True, key=f"custom_{pkey}"):
-                        enabled_platforms.append(pkey)
-
-            # Custom title and description
-            col_title, col_desc = st.columns([1, 1])
-            with col_title:
-                custom_title = st.text_input(
-                    "Title (for YouTube)",
-                    value=get_config("global_title", "Daily Short"),
-                    max_chars=100,
-                    key="custom_title_input"
-                )
-            with col_desc:
-                custom_desc = st.text_area(
-                    "Description",
-                    value=get_config("global_desc", "#shorts"),
-                    max_chars=2200,
-                    key="custom_desc_input"
-                )
-
-            # Custom date/time picker - stacked on mobile
-            st.markdown("**Schedule**")
-            col_date, col_time = st.columns([1, 1])
-            with col_date:
-                custom_date = st.date_input(
-                    "Date",
-                    value=ui_logic.get_schedule_start_time(queue_rows).date(),
-                    key="custom_date_input"
-                )
-            with col_time:
-                custom_time = st.time_input(
-                    "Time",
-                    value=ui_logic.get_schedule_start_time(queue_rows).time(),
-                    key="custom_time_input"
-                )
-
-            # Combine date and time with proper timezone handling
-            start_dt = ui_logic.get_schedule_start_time(queue_rows)
-            tz = start_dt.tzinfo if start_dt.tzinfo else pytz.UTC
-            
-            # Create datetime and apply timezone
-            custom_datetime = datetime.combine(custom_date, custom_time)
-            if hasattr(tz, 'localize'):
-                custom_datetime = tz.localize(custom_datetime)
-            else:
-                custom_datetime = custom_datetime.replace(tzinfo=tz)
-
             # Preview video safely with error handling
             try:
                 if uploaded_files[0].size > 0:
@@ -334,57 +272,205 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                 logger.warning("Failed to preview uploaded video: %s", e)
                 st.warning("⚠ Video preview unavailable (file may be processing)")
 
-            # Queue Video button with disable state and proper state management
-            if "queue_video_attempt" not in st.session_state:
-                st.session_state.queue_video_attempt = None
-            
-            is_queueing = st.session_state.queue_processing.get("queue_video", False)
-            
-            # Check if this specific file has already been queued
-            file_sig = (uploaded_files[0].name, uploaded_files[0].size, custom_datetime.isoformat())
-            already_queued = st.session_state.get("queued_video_sig") == file_sig
-            
-            if st.button(
-                "Queue Video", 
-                key="queue_custom_video_btn", 
-                type="primary", 
-                disabled=is_queueing or already_queued
-            ):
-                if not enabled_platforms:
-                    st.error("Please select at least one platform!")
-                else:
-                    st.session_state.queue_processing["queue_video"] = True
-                    
-                    # Double-check signature to prevent duplicate submissions
-                    if st.session_state.get("queued_video_sig") != file_sig:
-                        try:
-                            with st.spinner("Queueing video..."):
-                                count = ui_logic.save_custom_video_to_queue(
-                                    uploaded_files[0],
-                                    custom_datetime,
-                                    UPLOAD_DIR,
-                                    custom_title,
-                                    custom_desc,
-                                    enabled_platforms
-                                )
-                                if count > 0:
-                                    logger.info("Queued custom video for %s", custom_datetime.isoformat())
-                                    st.session_state["queued_video_sig"] = file_sig
-                                    # Clear cache to show updated queue
-                                    st.cache_data.clear()
-                                    st.success(f"✓ Video queued for {custom_datetime.strftime('%b %d, %Y at %H:%M')}!")
-                                    st.rerun()
-                                else:
-                                    st.error("Failed to queue video. Check logs for details.")
-                                    # Clear the processing state on error
-                                    st.session_state.queue_processing["queue_video"] = False
-                        except Exception as e:
-                            logger.error("Failed to queue video: %s", e, exc_info=True)
-                            st.error("Failed to queue video. Please try again.")
-                            st.session_state.queue_processing["queue_video"] = False
+            # Choice between custom schedule and regular queue
+            schedule_mode = st.radio(
+                "How would you like to schedule this video?",
+                options=["Add to Regular Queue", "Custom Schedule"],
+                horizontal=True,
+                key="single_video_schedule_mode"
+            )
+
+            if schedule_mode == "Add to Regular Queue":
+                # Regular queue mode - auto-schedule like batch uploads
+                st.markdown("**Add to Regular Queue**")
+                st.info("Video will be scheduled for the next available slot based on your schedule settings.")
+                
+                # Platform selection for regular queue
+                st.markdown("**Select Platforms:**")
+                platforms = get_platforms()
+                platform_cols = st.columns([1, 1])
+                enabled_platforms = []
+                
+                platform_list = list(platforms.keys())
+                for i, pkey in enumerate(platform_list):
+                    col = platform_cols[i % 2]
+                    with col:
+                        label = platforms[pkey]["label"]
+                        if st.checkbox(label, value=True, key=f"regular_{pkey}"):
+                            enabled_platforms.append(pkey)
+
+                # Queue Video button
+                is_queueing = st.session_state.queue_processing.get("queue_video_regular", False)
+                file_sig_regular = (uploaded_files[0].name, uploaded_files[0].size, "regular")
+                already_queued_regular = st.session_state.get("queued_video_sig_regular") == file_sig_regular
+                
+                if st.button(
+                    "Add to Queue",
+                    key="queue_regular_video_btn",
+                    type="primary",
+                    disabled=is_queueing or already_queued_regular
+                ):
+                    if not enabled_platforms:
+                        st.error("Please select at least one platform!")
                     else:
-                        st.info("This video has already been queued.")
-                        st.session_state.queue_processing["queue_video"] = False
+                        st.session_state.queue_processing["queue_video_regular"] = True
+                        
+                        if st.session_state.get("queued_video_sig_regular") != file_sig_regular:
+                            try:
+                                with st.spinner("Queueing video..."):
+                                    # Get next available slot
+                                    start_dt = ui_logic.get_schedule_start_time(queue_rows)
+                                    occupied = ui_logic.occupied_schedule_dates(queue_rows)
+                                    slots = next_daily_slots(1, start=start_dt, occupied_dates=occupied)
+                                    
+                                    if slots:
+                                        # Save with selected platforms
+                                        count = ui_logic.save_custom_video_to_queue(
+                                            uploaded_files[0],
+                                            slots[0],
+                                            UPLOAD_DIR,
+                                            get_config("global_title", "Daily Short"),
+                                            get_config("global_desc", "#shorts"),
+                                            enabled_platforms
+                                        )
+                                        if count > 0:
+                                            logger.info("Queued video for %s (regular queue)", slots[0].isoformat())
+                                            st.session_state["queued_video_sig_regular"] = file_sig_regular
+                                            # Clear the processing state on success
+                                            st.session_state.queue_processing["queue_video_regular"] = False
+                                            st.cache_data.clear()
+                                            st.success(f"✓ Video queued for {slots[0].strftime('%b %d, %Y at %H:%M')}!")
+                                            st.rerun()
+                                        else:
+                                            st.error("Failed to queue video. Check logs for details.")
+                                            st.session_state.queue_processing["queue_video_regular"] = False
+                                    else:
+                                        st.error("No available schedule slots found!")
+                                        st.session_state.queue_processing["queue_video_regular"] = False
+                            except Exception as e:
+                                logger.error("Failed to queue video: %s", e, exc_info=True)
+                                st.error("Failed to queue video. Please try again.")
+                                st.session_state.queue_processing["queue_video_regular"] = False
+                        else:
+                            st.info("This video has already been queued.")
+                            st.session_state.queue_processing["queue_video_regular"] = False
+
+            else:
+                # Custom scheduling mode
+                st.markdown("**Custom Video Settings**")
+
+                # Platform selection - use 2 columns that stack better on mobile
+                st.markdown("**Select Platforms:**")
+                platforms = get_platforms()
+                platform_cols = st.columns([1, 1])
+                enabled_platforms = []
+                
+                # Distribute platforms evenly
+                platform_list = list(platforms.keys())
+                for i, pkey in enumerate(platform_list):
+                    col = platform_cols[i % 2]
+                    with col:
+                        label = platforms[pkey]["label"]
+                        if st.checkbox(label, value=True, key=f"custom_{pkey}"):
+                            enabled_platforms.append(pkey)
+
+                # Custom title and description
+                col_title, col_desc = st.columns([1, 1])
+                with col_title:
+                    custom_title = st.text_input(
+                        "Title (for YouTube)",
+                        value=get_config("global_title", "Daily Short"),
+                        max_chars=100,
+                        key="custom_title_input"
+                    )
+                with col_desc:
+                    custom_desc = st.text_area(
+                        "Description",
+                        value=get_config("global_desc", "#shorts"),
+                        max_chars=2200,
+                        key="custom_desc_input"
+                    )
+
+                # Custom date/time picker - stacked on mobile
+                st.markdown("**Schedule**")
+                col_date, col_time = st.columns([1, 1])
+                with col_date:
+                    custom_date = st.date_input(
+                        "Date",
+                        value=ui_logic.get_schedule_start_time(queue_rows).date(),
+                        key="custom_date_input"
+                    )
+                with col_time:
+                    custom_time = st.time_input(
+                        "Time",
+                        value=ui_logic.get_schedule_start_time(queue_rows).time(),
+                        key="custom_time_input"
+                    )
+
+                # Combine date and time with proper timezone handling
+                start_dt = ui_logic.get_schedule_start_time(queue_rows)
+                tz = start_dt.tzinfo if start_dt.tzinfo else pytz.UTC
+                
+                # Create datetime and apply timezone
+                custom_datetime = datetime.combine(custom_date, custom_time)
+                if hasattr(tz, 'localize'):
+                    custom_datetime = tz.localize(custom_datetime)
+                else:
+                    custom_datetime = custom_datetime.replace(tzinfo=tz)
+
+                # Queue Video button with disable state and proper state management
+                if "queue_video_attempt" not in st.session_state:
+                    st.session_state.queue_video_attempt = None
+                
+                is_queueing = st.session_state.queue_processing.get("queue_video", False)
+                
+                # Check if this specific file has already been queued
+                file_sig = (uploaded_files[0].name, uploaded_files[0].size, custom_datetime.isoformat())
+                already_queued = st.session_state.get("queued_video_sig") == file_sig
+                
+                if st.button(
+                    "Queue Video",
+                    key="queue_custom_video_btn",
+                    type="primary",
+                    disabled=is_queueing or already_queued
+                ):
+                    if not enabled_platforms:
+                        st.error("Please select at least one platform!")
+                    else:
+                        st.session_state.queue_processing["queue_video"] = True
+                        
+                        # Double-check signature to prevent duplicate submissions
+                        if st.session_state.get("queued_video_sig") != file_sig:
+                            try:
+                                with st.spinner("Queueing video..."):
+                                    count = ui_logic.save_custom_video_to_queue(
+                                        uploaded_files[0],
+                                        custom_datetime,
+                                        UPLOAD_DIR,
+                                        custom_title,
+                                        custom_desc,
+                                        enabled_platforms
+                                    )
+                                    if count > 0:
+                                        logger.info("Queued custom video for %s", custom_datetime.isoformat())
+                                        st.session_state["queued_video_sig"] = file_sig
+                                        # Clear the processing state on success
+                                        st.session_state.queue_processing["queue_video"] = False
+                                        # Clear cache to show updated queue
+                                        st.cache_data.clear()
+                                        st.success(f"✓ Video queued for {custom_datetime.strftime('%b %d, %Y at %H:%M')}!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to queue video. Check logs for details.")
+                                        # Clear the processing state on error
+                                        st.session_state.queue_processing["queue_video"] = False
+                            except Exception as e:
+                                logger.error("Failed to queue video: %s", e, exc_info=True)
+                                st.error("Failed to queue video. Please try again.")
+                                st.session_state.queue_processing["queue_video"] = False
+                        else:
+                            st.info("This video has already been queued.")
+                            st.session_state.queue_processing["queue_video"] = False
         else:
             # Multiple videos = auto-queue with batch mode
             # Auto-queue: Create signature and check if already processed
@@ -453,6 +539,7 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
     else:
         st.session_state.pop("queued_sig", None)
         st.session_state.pop("queued_video_sig", None)
+        st.session_state.pop("queued_video_sig_regular", None)
     
     # Queue list
     st.markdown("### **Queue**")
@@ -667,35 +754,30 @@ def render_archived_platform_row(archive_id: int, platform_key: str, label: str,
             st.session_state.queue_processing[f"restore_force_{archive_id}_{platform_key}"] = True
             with st.spinner(f"Restoring and queuing {label} upload..."):
                 try:
-                    # Restore to queue
-                    success = restore_archived_to_queue(archive_id)
-                    if success:
-                        # Get the newly restored queue item (it should be the latest one)
-                        from src.database import get_queue
-                        queue = get_queue(limit=1)
-                        if queue:
-                            restored_id = queue[0]["id"]
+                    # Restore to queue - returns the new queue item ID
+                    restored_id = restore_archived_to_queue(archive_id)
+                    if restored_id > 0:
+                        # Clear the platform status and set to retry
+                        cleared = clear_platform_status(restored_id, platform_key)
+                        if cleared:
+                            from src.database import get_queue_item
+                            row = get_queue_item(restored_id)
+                            current_logs = _parse_platform_logs(row.get("platform_logs")) if row else {}
+                            update_queue_status(restored_id, "retry", None, current_logs)
 
-                            # Clear the platform status and set to retry
-                            cleared = clear_platform_status(restored_id, platform_key)
-                            if cleared:
-                                from src.database import get_queue_item
-                                row = get_queue_item(restored_id)
-                                current_logs = _parse_platform_logs(row.get("platform_logs")) if row else {}
-                                update_queue_status(restored_id, "retry", None, current_logs)
+                            # Set force flag for this specific queue item and platform
+                            set_config(FORCE_KEY, 1)
+                            set_config(FORCE_PLATFORM_KEY, platform_key)
+                            set_config(FORCE_QUEUE_ID_KEY, restored_id)
 
-                                # Set force flag for this platform
-                                set_config(FORCE_KEY, 1)
-                                set_config(FORCE_PLATFORM_KEY, platform_key)
-
-                                logger.info("Restored archive #%s and queued force upload for platform: %s", archive_id, label)
-                                st.cache_data.clear()
-                                st.success(f"✓ Restored to Queue!")
-                                st.session_state.queue_processing[f"restore_force_{archive_id}_{platform_key}"] = False
-                                st.rerun()
-                            else:
-                                logger.warning("Restored but failed to clear platform status for archive #%s, platform: %s", archive_id, label)
-                                st.error("Restored but failed to queue force upload")
+                            logger.info("Restored archive #%s as queue #%s and queued force upload for platform: %s", archive_id, restored_id, label)
+                            st.cache_data.clear()
+                            st.success(f"✓ Restored to Queue!")
+                            st.session_state.queue_processing[f"restore_force_{archive_id}_{platform_key}"] = False
+                            st.rerun()
+                        else:
+                            logger.warning("Restored but failed to clear platform status for archive #%s, platform: %s", archive_id, label)
+                            st.error("Restored but failed to queue force upload")
                     else:
                         st.error("Failed to restore. Item may not exist.")
                 except Exception as e:
