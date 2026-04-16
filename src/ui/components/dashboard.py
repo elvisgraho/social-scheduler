@@ -34,13 +34,16 @@ def render_dashboard_tab(queue_rows, uploaded_count: int, logger):
         set_config("queue_paused", int(pause_toggle))
         
         if pause_toggle:
-            # Queue was paused
             logger.info("Queue paused by user")
         else:
-            # Queue was unpaused - reschedule all pending items to next available slots
-            logger.info("Queue unpaused by user - rescheduling pending items")
-            rescheduled_count, _ = ui_logic.reschedule_pending_items(queue_rows)
-            logger.info("Rescheduled %d pending items after unpause", rescheduled_count)
+            # Queue resumed — only push OVERDUE items to the next available slots.
+            # Videos still scheduled for a future time are left exactly as-is so
+            # custom-scheduled dates are never silently overwritten.
+            rescheduled_count, _ = ui_logic.reschedule_overdue_items(queue_rows)
+            if rescheduled_count:
+                logger.info("Queue resumed: rescheduled %d overdue items to next available slots", rescheduled_count)
+            else:
+                logger.info("Queue resumed: no overdue items to reschedule")
         
         st.rerun()
     

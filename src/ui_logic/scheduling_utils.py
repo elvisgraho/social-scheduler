@@ -119,6 +119,80 @@ def shuffle_queue(queue_rows: List[Dict[str, Any]]) -> Tuple[int, Optional[datet
     return shuffled, slots[0] if shuffled else None
 
 
+def reschedule_overdue_items(
+    queue_rows: List[Dict[str, Any]],
+    now: Optional[datetime] = None,
+) -> Tuple[int, Optional[datetime]]:
+    """
+    Called on queue resume.  Reschedules ONLY items whose scheduled_for is in
+    the past (overdue because the queue was paused).
+
+    Items scheduled for a future time are left completely untouched — their
+    custom dates/times are preserved exactly as the user set them.
+
+    Returns (count_rescheduled, first_slot_used).
+    """
+    cfg = get_schedule()
+    try:
+        tz = pytz.timezone(cfg.get("timezone", "UTC"))
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+
+    _now = (now or datetime.now(tz))
+    if _now.tzinfo is None:
+        _now = tz.localize(_now)
+    else:
+        _now = _now.astimezone(tz)
+
+    def _as_aware(dt: Optional[datetime]) -> Optional[datetime]:
+        if dt is None:
+            return None
+        return tz.localize(dt) if dt.tzinfo is None else dt.astimezone(tz)
+
+    # Items that are overdue (past their scheduled time, or have no time at all)
+    overdue: List[Dict[str, Any]] = []
+    for row in queue_rows:
+        if row.get("status") not in ("pending", "retry", "failed"):
+            continue
+        dt = _as_aware(parse_iso(row.get("scheduled_for")))
+        if dt is None or dt <= _now:
+            overdue.append(row)
+
+    if not overdue:
+        return 0, None
+
+    # Block dates already claimed by FUTURE-scheduled items so the rescheduled
+    # overdue items don't collide with them.
+    occupied: Set[str] = set()
+    for row in queue_rows:
+        if row.get("status") not in ("pending", "retry", "failed"):
+            continue
+        dt = _as_aware(parse_iso(row.get("scheduled_for")))
+        if dt is not None and dt > _now:
+            occupied.add(dt.date().isoformat())
+
+    slots = next_daily_slots(len(overdue), start=_now, occupied_dates=occupied)
+    if not slots:
+        return 0, None
+
+    rescheduled = 0
+    for row, slot in zip(overdue, slots):
+        if row.get("status") == "failed":
+            raw = row.get("platform_logs", {})
+            logs = raw if isinstance(raw, dict) else {}
+            update_queue_status(row["id"], "retry", row.get("last_error"), logs)
+        reschedule_queue_item(row["id"], slot.isoformat())
+        occupied.add(slot.date().isoformat())
+        rescheduled += 1
+
+    if rescheduled < len(overdue):
+        logger.warning(
+            "Only rescheduled %d/%d overdue items (limited slots available).",
+            rescheduled, len(overdue),
+        )
+    return rescheduled, slots[0] if rescheduled else None
+
+
 def reschedule_pending_items(
     queue_rows: List[Dict[str, Any]], start: Optional[datetime] = None
 ) -> Tuple[int, Optional[datetime]]:

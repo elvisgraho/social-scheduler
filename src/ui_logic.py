@@ -8,6 +8,7 @@ from src.ui_logic.scheduling_utils import (
     get_schedule_start_time,
     occupied_schedule_dates,
     shuffle_queue,
+    reschedule_overdue_items,
     reschedule_pending_items,
 )
 from src.ui_logic.file_utils import (
@@ -25,6 +26,7 @@ __all__ = [
     "get_schedule_start_time",
     "occupied_schedule_dates",
     "shuffle_queue",
+    "reschedule_overdue_items",
     "reschedule_pending_items",
     "save_files_to_queue",
     "save_custom_video_to_queue",

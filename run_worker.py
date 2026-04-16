@@ -557,9 +557,10 @@ def check_and_post():
             except (ValueError, TypeError):
                 logger.warning("Invalid force_queue_id: %s", force_queue_id)
         
-        # Normal scheduling: get due items
+        # Normal scheduling: get due items — limit to 1 per tick so a long pause
+        # never causes a burst upload of every overdue item at once.
         if not due and not force:
-            due = get_due_queue(now.isoformat())
+            due = get_due_queue(now.isoformat())[:1]
         
         # If forcing but no specific item found, fall back to earliest pending
         if not due and force and not force_queue_id:

@@ -231,13 +231,14 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
 
     # Quick actions
     has_queue_items = any(row["status"] in ("pending", "retry") for row in queue_rows)
-    
-    c1, c2 = st.columns(2)
-    
+
+    c1, c2, c3 = st.columns(3)
+
     # Disable buttons while processing
     is_shuffling = st.session_state.queue_processing.get("shuffle", False)
     is_deleting = st.session_state.queue_processing.get("delete_next", False)
-    
+    is_compacting = st.session_state.queue_processing.get("fill_gaps", False)
+
     with c1:
         if st.button("Shuffle Queue", key="shuffle_queue_btn", disabled=not has_queue_items or is_shuffling):
             st.session_state.queue_processing["shuffle"] = True
@@ -245,7 +246,6 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                 shuffled, _ = ui_logic.shuffle_queue(queue_rows)
                 if shuffled > 0:
                     logger.info("Queue shuffled: %d items", shuffled)
-                    # Clear cache to show updated data
                     st.cache_data.clear()
                     st.success(f"✓ Shuffled {shuffled} items!")
                 else:
@@ -255,7 +255,29 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                 st.error("Failed to shuffle queue. Please try again.")
             st.session_state.queue_processing["shuffle"] = False
             st.rerun()
-    
+
+    with c3:
+        if st.button(
+            "Fill Gaps",
+            key="fill_gaps_btn",
+            help="Pack all pending videos into the nearest consecutive slots (preserves order, closes gaps left by deletions)",
+            disabled=not has_queue_items or is_compacting,
+        ):
+            st.session_state.queue_processing["fill_gaps"] = True
+            try:
+                compacted, first_slot = ui_logic.reschedule_pending_items(queue_rows)
+                if compacted > 0:
+                    logger.info("Queue compacted: %d items moved, first slot %s", compacted, first_slot)
+                    st.cache_data.clear()
+                    st.success(f"✓ Moved {compacted} items — next up {first_slot.strftime('%b %d at %H:%M') if first_slot else '?'}")
+                else:
+                    st.info("No items to compact")
+            except Exception as e:
+                logger.error("Failed to compact queue: %s", e, exc_info=True)
+                st.error("Failed to fill gaps. Please try again.")
+            st.session_state.queue_processing["fill_gaps"] = False
+            st.rerun()
+
     with c2:
         if st.button("Delete Next", key="delete_next_btn", type="secondary", disabled=not bool(queue_rows) or is_deleting):
             st.session_state.queue_processing["delete_next"] = True
