@@ -1,5 +1,6 @@
 import time
 from selenium.common.exceptions import WebDriverException
+from selenium.webdriver.common.by import By
 
 
 def dismiss_shadow_cookies(driver) -> bool:
@@ -198,40 +199,54 @@ def find_file_input(driver):
     Locate the file input on TikTok's upload page.
 
     TikTok embeds its upload form inside an <iframe>.  This function:
-      1. Tries the main document first (handles any future layout changes).
-      2. Scans all iframes, staying inside the one that contains the input.
+      1. Always resets to default content first so repeated calls in the retry
+         loop never start from a stale iframe context.
+      2. Tries the main document first (handles any future layout changes).
+      3. Scans all top-level iframes, staying inside the one that has the input
+         so the caller can immediately send_keys to it.
 
     Returns (input_element, in_iframe: bool) or (None, False) on failure.
+    On failure the driver is always in default content.
     Uses a single JS call per iframe to minimise Pi round-trips.
     """
-    # 1. Main document (quick check — unlikely but free)
+    # Always start from a clean context — critical when called in a retry loop.
     try:
-        el = driver.find_element("xpath", "//input[@type='file']")
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+    # 1. Main document (quick check — free, handles future TikTok layout changes)
+    try:
+        el = driver.find_element(By.XPATH, "//input[@type='file']")
         if el:
             return el, False
     except Exception:
         pass
 
-    # 2. Iframe scan — stay inside the iframe that has the input
+    # 2. Top-level iframe scan.
+    # iframes are fetched from default content, so they reference the right frames.
     try:
-        iframes = driver.find_elements("tag name", "iframe")
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
     except Exception:
         return None, False
 
     for frame in iframes:
         try:
             driver.switch_to.frame(frame)
-            # Single JS query — faster than XPath over the wire
             el = driver.execute_script(
                 "return document.querySelector('input[type=\"file\"]');"
             )
             if el:
+                # Leave driver inside this iframe so the caller can send_keys.
                 return el, True
+            # Input not in this frame — go back to default before trying the next.
             driver.switch_to.default_content()
         except Exception:
+            # Frame switch or JS failed — reset and continue.
             try:
                 driver.switch_to.default_content()
             except Exception:
                 pass
 
+    # Nothing found — driver is in default content.
     return None, False

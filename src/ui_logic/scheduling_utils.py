@@ -178,8 +178,18 @@ def reschedule_overdue_items(
     rescheduled = 0
     for row, slot in zip(overdue, slots):
         if row.get("status") == "failed":
-            raw = row.get("platform_logs", {})
-            logs = raw if isinstance(raw, dict) else {}
+            # platform_logs is stored as a JSON string in SQLite, not a dict.
+            # Preserve existing logs so already-succeeded platforms aren't re-uploaded.
+            raw = row.get("platform_logs")
+            if isinstance(raw, dict):
+                logs = raw
+            elif isinstance(raw, str) and raw:
+                try:
+                    logs = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    logs = {}
+            else:
+                logs = {}
             update_queue_status(row["id"], "retry", row.get("last_error"), logs)
         reschedule_queue_item(row["id"], slot.isoformat())
         occupied.add(slot.date().isoformat())

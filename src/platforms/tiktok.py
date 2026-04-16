@@ -354,7 +354,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         in_iframe = False
 
         for i in range(FILE_INPUT_SEARCH_TIMEOUT):
-            file_input, in_iframe = find_file_input(driver)
+            file_input, _ = find_file_input(driver)
             if file_input:
                 break
 

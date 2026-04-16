@@ -159,22 +159,25 @@ def _pull_queue_forward(now: datetime) -> None:
         # Block dates already used by non-pending items (e.g. processing, failed)
         # so the pulled items don't stack on days that are already occupied.
         occupied: set = set()
-        from src.ui_logic.datetime_utils import parse_iso as _parse_iso
         cfg = get_schedule()
-        import pytz as _pytz
         try:
-            _tz = _pytz.timezone(cfg.get("timezone", "UTC"))
+            _tz = pytz.timezone(cfg.get("timezone", "UTC"))
         except Exception:
-            _tz = _pytz.UTC
+            _tz = pytz.UTC
 
         for row in all_rows:
             if row.get("status") in ("pending", "retry"):
                 continue
-            dt = _parse_iso(row.get("scheduled_for"))
-            if dt:
+            raw_dt = row.get("scheduled_for")
+            if not raw_dt:
+                continue
+            try:
+                dt = datetime.fromisoformat(raw_dt)
                 if dt.tzinfo:
                     dt = dt.astimezone(_tz)
                 occupied.add(dt.date().isoformat())
+            except (ValueError, TypeError):
+                pass
 
         slots = next_daily_slots(len(pending), start=now, occupied_dates=occupied)
         if len(slots) < len(pending):
