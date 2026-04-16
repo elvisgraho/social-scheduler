@@ -187,8 +187,6 @@ def reschedule_pending_items(
         # We handle logs parsing here to avoid double-stringification in update_queue_status
         current_logs = _parse_logs(row.get("platform_logs"))
         
-        status_to_set = "retry" if row.get("status") == "failed" else row.get("status")
-        
         # 1. Update status if changing from failed -> retry
         if row.get("status") == "failed":
             update_queue_status(

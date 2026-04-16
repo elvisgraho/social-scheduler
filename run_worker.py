@@ -21,6 +21,7 @@ from src.database import (
     archive_uploaded_item,
     get_config,
     get_due_queue,
+    get_pending_count,
     get_queue,
     increment_attempts,
     init_db,
@@ -150,15 +151,37 @@ def _pull_queue_forward(now: datetime) -> None:
     available daily slots starting now (preserving one-per-day constraint).
     """
     try:
-        pending = [row for row in get_queue(limit=200) if row.get("status") in ("pending", "retry")]
+        all_rows = get_queue(limit=200)
+        pending = [row for row in all_rows if row.get("status") in ("pending", "retry")]
         if not pending:
             return
 
-        slots = next_daily_slots(len(pending), start=now, occupied_dates=set())
+        # Block dates already used by non-pending items (e.g. processing, failed)
+        # so the pulled items don't stack on days that are already occupied.
+        occupied: set = set()
+        from src.ui_logic.datetime_utils import parse_iso as _parse_iso
+        cfg = get_schedule()
+        import pytz as _pytz
+        try:
+            _tz = _pytz.timezone(cfg.get("timezone", "UTC"))
+        except Exception:
+            _tz = _pytz.UTC
+
+        for row in all_rows:
+            if row.get("status") in ("pending", "retry"):
+                continue
+            dt = _parse_iso(row.get("scheduled_for"))
+            if dt:
+                if dt.tzinfo:
+                    dt = dt.astimezone(_tz)
+                occupied.add(dt.date().isoformat())
+
+        slots = next_daily_slots(len(pending), start=now, occupied_dates=occupied)
         if len(slots) < len(pending):
             logger.warning("Not enough slots to pull queue forward (%s needed, %s available).", len(pending), len(slots))
         for row, slot in zip(pending, slots):
             reschedule_queue_item(row["id"], slot.isoformat())
+            occupied.add(slot.date().isoformat())
             logger.info("Pulled queue item %s forward to %s.", row["id"], slot.isoformat())
     except Exception as exc:
         logger.warning("Failed to pull queue forward: %s", exc)
@@ -207,14 +230,13 @@ def reset_stale_tasks():
         logger.error("Failed to reset stale tasks: %s", e)
 
 
-def process_video(video: dict, forced_platforms: set[str] | None = None) -> None:
+def process_video(video: dict, forced_platforms: set[str] | None = None, is_forced: bool = False) -> None:
     queue_id = video["id"]
     file_path = video["file_path"]
     forced_platforms = set(forced_platforms or [])
 
     # Allow processing if forced, even when paused
     paused = bool(int(get_config(PAUSE_KEY, 0) or 0))
-    is_forced = len(forced_platforms) > 0
     if paused and not is_forced:
         logger.info("Queue is paused. Skipping processing for #%s.", queue_id)
         return
@@ -340,11 +362,11 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
             # CONTINUE to other platforms instead of stopping
             continue
 
-        # Add delay BETWEEN platforms (not before first platform)
-        # This simulates switching between apps like a human would
-        if idx > 0:
+        # Add delay BETWEEN platforms (not before first platform).
+        # Simulates switching between apps like a human would.
+        # Skipped on forced uploads — the user is waiting for immediate feedback.
+        if idx > 0 and not is_forced:
             if key == "instagram":
-                # Instagram is most sensitive to bot detection, add longer delay
                 delay = random.uniform(60, 180)  # 1-3 minutes
                 logger.info("Waiting %d seconds before Instagram upload (human-like delay)...", int(delay))
             else:
@@ -433,8 +455,8 @@ def process_video(video: dict, forced_platforms: set[str] | None = None) -> None
         if cfg["connected"]():
             total_platforms_to_try += 1
 
-    # Calculate pending queue count
-    pending_count = len([r for r in get_queue(limit=500) if r.get("status") in ("pending", "retry")])
+    # Calculate pending queue count (single COUNT query — avoids fetching all rows)
+    pending_count = get_pending_count()
 
     # Determine if this upload should be considered successful
     has_any_success = len(successes) > 0
@@ -561,10 +583,12 @@ def check_and_post():
 
             logger.info("Processing queue item %s.", video["id"])
             platforms_to_run = {force_platform} if force_platform and force else None
-            process_video(video, platforms_to_run)
-            
-            # Add delay between different videos too
-            time.sleep(random.uniform(5, 15))
+            process_video(video, platforms_to_run, is_forced=force)
+
+            # Add a short delay between videos to avoid hammering the platforms.
+            # Skip for forced runs — the user is waiting for immediate results.
+            if not force:
+                time.sleep(random.uniform(5, 15))
         
         # If we just forced an item and there are more pending/retry items, pull the queue forward
         if force:

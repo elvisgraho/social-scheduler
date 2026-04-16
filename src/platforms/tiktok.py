@@ -25,7 +25,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import NoSuchElementException
 
 # Add current directory to path for local imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,6 +33,7 @@ if current_dir not in sys.path:
 
 from tiktok_selenium_utils import (
     dismiss_shadow_cookies,
+    find_file_input,
     handle_are_you_sure_exit,
     handle_continue_to_post,
     handle_standard_popups,
@@ -83,10 +83,10 @@ REFRESH_WARNING_DAYS = 25
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
 # Upload timeout constants (in iterations)
-FILE_INPUT_SEARCH_TIMEOUT = 30  # 30 seconds
-UPLOAD_COMPLETE_TIMEOUT = 120   # 6 minutes (120 * 3s)
-POST_BUTTON_TIMEOUT = 30        # 60 seconds
-VERIFICATION_TIMEOUT = 120      # 60 seconds
+FILE_INPUT_SEARCH_TIMEOUT = 30  # 30 seconds  (30 iters × 1s)
+UPLOAD_COMPLETE_TIMEOUT = 120   # 6 minutes   (120 iters × 3s)
+POST_BUTTON_TIMEOUT = 30        # 60 seconds  (30 iters × 2s)
+VERIFICATION_TIMEOUT = 120      # 60 seconds  (120 iters × 0.5s)
 
 # Supported video formats
 SUPPORTED_VIDEO_FORMATS = {'.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv', '.wmv', '.m4v'}
@@ -121,6 +121,8 @@ def _persist_bundle(bundle: Dict) -> None:
     set_json_config(SESSION_KEY, bundle)
     if bundle.get("sessionid"):
         set_config(LEGACY_KEY, bundle["sessionid"])
+    else:
+        set_config(LEGACY_KEY, "")
 
 def save_session(session_id: str) -> None:
     cleaned = session_id.strip()
@@ -208,7 +210,7 @@ def _browser_log(driver, message):
         safe_msg = message.replace("'", "\\'")
         driver.execute_script(f"console.log('[TIKTOK_BOT] {safe_msg}');")
         logger.info(message)
-    except:
+    except Exception:
         # In case driver is closed or script fails
         logger.info(message)
 
@@ -229,7 +231,8 @@ def _debug_dump(driver, queue_name="error"):
             with open(log_path, "w", encoding="utf-8") as f:
                 for entry in logs:
                     f.write(f"{entry['level']}: {entry['message']}\n")
-        except: pass
+        except Exception:
+            pass
                 
         logger.error(f"Debug artifacts saved: {screen_path}")
     except Exception:
@@ -339,46 +342,38 @@ def upload(video_path: str, description: str, local_session_key: str = None):
 
         time.sleep(2)
         
-        # --- 1. INPUT RADAR ---
+        # --- 1. LOCATE FILE INPUT ---
+        # Dismiss cookie banner immediately — it blocks the upload form on first load.
+        # Run twice: once right after navigation and once more after a short wait in
+        # case TikTok injects the banner asynchronously.
+        dismiss_shadow_cookies(driver)
+        handle_standard_popups(driver)
+
         _browser_log(driver, "Scanning for file input...")
         file_input = None
+        in_iframe = False
+
         for i in range(FILE_INPUT_SEARCH_TIMEOUT):
-            # Periodically clear popups
+            file_input, in_iframe = find_file_input(driver)
+            if file_input:
+                break
+
+            # Re-dismiss on every 3rd attempt in case banners reappear
             if i % 3 == 0:
                 handle_standard_popups(driver)
                 dismiss_shadow_cookies(driver)
 
-            try:
-                file_input = driver.find_element(By.XPATH, "//input[@type='file']")
-                break
-            except NoSuchElementException:
-                pass
-            
-            # Check Iframes
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            found_in_frame = False
-            for frame in iframes:
-                try:
-                    driver.switch_to.frame(frame)
-                    if len(driver.find_elements(By.XPATH, "//input[@type='file']")) > 0:
-                        file_input = driver.find_element(By.XPATH, "//input[@type='file']")
-                        found_in_frame = True
-                        break 
-                except: pass
-                finally:
-                    if not found_in_frame: driver.switch_to.default_content()
-            if found_in_frame: break
-            
             time.sleep(1)
 
         if not file_input:
-            raise Exception("Could not locate file input")
+            raise Exception("Could not locate file input after %d seconds" % FILE_INPUT_SEARCH_TIMEOUT)
 
         _browser_log(driver, "Uploading file...")
         driver.execute_script("arguments[0].style.display = 'block';", file_input)
-        # Use pathlib for cross-platform path handling
         file_input.send_keys(str(Path(video_path).resolve()))
         time.sleep(5)
+
+        # Return to main document regardless of whether we're inside an iframe
         driver.switch_to.default_content()
 
         # --- 2. WAIT LOOP ---
@@ -396,16 +391,17 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                 replace_btns = driver.find_elements(By.XPATH, "//button[@aria-label='Replace' or contains(., 'Replace')]")
                 success_status = driver.find_elements(By.XPATH, "//div[contains(@class, 'info-status') and contains(@class, 'success')]")
                 cancel_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Cancel')]")
-                
+
                 # Completion Logic: (Replace OR Success) AND No Cancel button
                 if (len(replace_btns) > 0 or len(success_status) > 0) and len(cancel_btns) == 0:
                     _browser_log(driver, "Upload confirmed complete.")
                     upload_complete = True
                     break
-                
+
                 if i % 10 == 0:
-                     _browser_log(driver, f"Still uploading... (Attempt {i})")
-            except Exception: pass
+                    _browser_log(driver, f"Still uploading... (Attempt {i})")
+            except Exception:
+                pass
             time.sleep(3)
 
         if not upload_complete:
@@ -482,6 +478,7 @@ def upload(video_path: str, description: str, local_session_key: str = None):
         # --- 4. POST ---
         _browser_log(driver, "Looking for Post button...")
 
+        post_clicked = False
         for _ in range(POST_BUTTON_TIMEOUT):
             try:
                 if handle_continue_to_post(driver, _browser_log):
@@ -496,49 +493,79 @@ def upload(video_path: str, description: str, local_session_key: str = None):
                 if btns:
                     post_btn = btns[0]
                     if post_btn.is_enabled() and "disabled" not in post_btn.get_attribute("class"):
-                        
+
                         # Scroll Center (Safe)
                         driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", post_btn)
                         time.sleep(1.5)
-                        
+
                         # Last check for modals before clicking
                         if handle_continue_to_post(driver, _browser_log):
                             _browser_log(driver, "Modal appeared during scroll - dismissed, retrying...")
                             continue
-                        
+
                         if IS_LOCAL:
                             time.sleep(9999)
 
                         _browser_log(driver, "Clicking Post Button")
                         driver.execute_script("arguments[0].click();", post_btn)
+                        post_clicked = True
                         _browser_log(driver, "Post button clicked. Moving to verification...")
                         break
-            except: pass
+            except Exception:
+                pass
             time.sleep(2)
+
+        if not post_clicked:
+            raise Exception("Post button not found or could not be clicked")
 
         # --- 5. VERIFICATION ---
         _browser_log(driver, "Verifying upload...")
 
-        # Loop to catch "Continue to post?" modal or Success
+        # Success text patterns TikTok uses across UI variants
+        _SUCCESS_TEXTS = [
+            "Manage your posts",
+            "Upload another video",
+            "Post published",
+            "Video uploaded",
+            "Your video has been",
+        ]
+
+        def _check_success(drv) -> bool:
+            """Return True if any success indicator is visible or the page has left the upload flow."""
+            try:
+                current_url = drv.current_url
+                # URL left the /upload path — TikTok redirected after successful post
+                if "upload" not in current_url:
+                    return True
+                page_text = drv.find_element(By.TAG_NAME, "body").text
+                return any(phrase in page_text for phrase in _SUCCESS_TEXTS)
+            except Exception:
+                return False
+
         for _ in range(VERIFICATION_TIMEOUT):
-            # A. Success Indicators
-            if "upload" not in driver.current_url or \
-               len(driver.find_elements(By.XPATH, "//div[contains(., 'Manage your posts')]")) > 0 or \
-               len(driver.find_elements(By.XPATH, "//div[contains(., 'Upload another video')]")) > 0:
-                
+            if _check_success(driver):
                 set_account_state("tiktok", True, None)
                 _browser_log(driver, "Upload Successful!")
                 return True, "Upload Successful"
-            
-            # B. "Post Now" Modal Check
+
+            # Handle any remaining "Post Now?" modals
             if handle_continue_to_post(driver, _browser_log):
                 _browser_log(driver, "Handled modal during verification phase.")
                 time.sleep(2)
                 continue
-                
+
             time.sleep(0.5)
-            
-        raise Exception("Verification failed - Success indicators not found")
+
+        # Verification timed out, but the Post button WAS clicked.
+        # Treat as probable success to prevent a retry that would double-post.
+        # The video most likely went through — TikTok's UI was just slow/different.
+        logger.warning(
+            "TikTok verification timed out after Post was clicked. "
+            "Treating as probable success to avoid double-post. "
+            "Check TikTok manually to confirm."
+        )
+        set_account_state("tiktok", True, None)
+        return True, "Upload Successful (verified by post click; confirmation page not detected — check TikTok manually)"
 
     except Exception as e:
         logger.error(f"TikTok Upload Failed: {e}")

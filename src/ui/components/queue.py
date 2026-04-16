@@ -13,6 +13,36 @@ FORCE_PLATFORM_KEY = "queue_force_platform"
 FORCE_QUEUE_ID_KEY = "queue_force_id"
 
 
+def _get_schedule_timezone():
+    """Return the configured schedule timezone, falling back to UTC."""
+    schedule = get_schedule()
+    try:
+        return pytz.timezone(schedule.get("timezone", "UTC"))
+    except pytz.UnknownTimeZoneError:
+        return pytz.UTC
+
+
+def _as_schedule_datetime(value):
+    """Convert a stored datetime string into the configured schedule timezone."""
+    dt = ui_logic.parse_iso(value)
+    if not dt:
+        return None
+
+    tz = _get_schedule_timezone()
+    if dt.tzinfo is None:
+        return tz.localize(dt)
+    return dt.astimezone(tz)
+
+
+def _combine_schedule_datetime(selected_date, selected_time):
+    """Build a timezone-aware datetime from separate date and time inputs."""
+    tz = _get_schedule_timezone()
+    combined = datetime.combine(selected_date, selected_time)
+    if hasattr(tz, "localize"):
+        return tz.localize(combined)
+    return combined.replace(tzinfo=tz)
+
+
 @st.fragment
 def render_calendar_view(queue_rows):
     """Render a calendar view of scheduled uploads with gap detection."""
@@ -142,7 +172,7 @@ def _parse_platform_logs(log_value):
     return {}
 
 
-def render_platform_status_row(row_id: int, platform_key: str, label: str, log_value, file_path: str, logger):
+def render_platform_status_row(row_id: int, platform_key: str, label: str, log_value, logger):
     """Render status and force upload button for a single platform."""
     logs = _parse_platform_logs(log_value)
     status_text = logs.get(platform_key, "")
@@ -155,10 +185,12 @@ def render_platform_status_row(row_id: int, platform_key: str, label: str, log_v
     if is_success:
         st.success(f"✓ {label}: Success")
     elif is_failed:
-        st.error(f"✗ {label}: {status_text[:40]}...")
+        truncated = str(status_text)
+        suffix = "..." if len(truncated) > 40 else ""
+        st.error(f"✗ {label}: {truncated[:40]}{suffix}")
     else:
         st.info(f"○ {label}: Pending")
-    
+
     # Force button below status (only if not already successful)
     if not is_success:
         if st.button(f"Force {label}", key=f"force_{row_id}_{platform_key}"):
@@ -407,16 +439,9 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                         key="custom_time_input"
                     )
 
-                # Combine date and time with proper timezone handling
-                start_dt = ui_logic.get_schedule_start_time(queue_rows)
-                tz = start_dt.tzinfo if start_dt.tzinfo else pytz.UTC
-                
-                # Create datetime and apply timezone
-                custom_datetime = datetime.combine(custom_date, custom_time)
-                if hasattr(tz, 'localize'):
-                    custom_datetime = tz.localize(custom_datetime)
-                else:
-                    custom_datetime = custom_datetime.replace(tzinfo=tz)
+                # Combine date and time in the configured schedule timezone
+                custom_datetime = _combine_schedule_datetime(custom_date, custom_time)
+                now_in_schedule_tz = datetime.now(_get_schedule_timezone())
 
                 # Queue Video button with disable state and proper state management
                 if "queue_video_attempt" not in st.session_state:
@@ -436,6 +461,8 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                 ):
                     if not enabled_platforms:
                         st.error("Please select at least one platform!")
+                    elif custom_datetime <= now_in_schedule_tz:
+                        st.error("Please choose a future date and time.")
                     else:
                         st.session_state.queue_processing["queue_video"] = True
                         
@@ -547,6 +574,10 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
     if queue_rows:
         platforms = get_platforms()
 
+        # Read global defaults once — avoids a DB round-trip per queue row
+        _global_title = get_config("global_title", "")
+        _global_desc = get_config("global_desc", "")
+
         # Add pagination to prevent crashes with many videos
         items_per_page = 20
         total_items = len(queue_rows)
@@ -561,9 +592,9 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                 step=1,
                 key="queue_page"
             )
-            st.caption(f"Showing {min(items_per_page, total_items)} of {total_items} items")
             start_idx = (page - 1) * items_per_page
             end_idx = min(start_idx + items_per_page, total_items)
+            st.caption(f"Showing {end_idx - start_idx} of {total_items} items (page {int(page)}/{total_pages})")
             displayed_rows = queue_rows[start_idx:end_idx]
         else:
             displayed_rows = queue_rows
@@ -608,10 +639,12 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                     st.write(f"Status: {row['status']}")
 
                     # Show custom title/description if set
-                    if row.get("title") and row.get("title") != get_config("global_title", ""):
-                        st.write(f"Title: {row['title'][:40]}...")
-                    if row.get("description") and row.get("description") != get_config("global_desc", ""):
-                        st.write(f"Desc: {row['description'][:40]}...")
+                    if row.get("title") and row.get("title") != _global_title:
+                        t = row["title"]
+                        st.write(f"Title: {t[:40]}{'...' if len(t) > 40 else ''}")
+                    if row.get("description") and row.get("description") != _global_desc:
+                        d = row["description"]
+                        st.write(f"Desc: {d[:40]}{'...' if len(d) > 40 else ''}")
                     if row.get("last_error"):
                         st.error(row['last_error'][:50])
                     
@@ -638,18 +671,38 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                                 pkey,
                                 pcfg["label"],
                                 row.get("platform_logs"),
-                                row["file_path"],
                                 logger,
                             )
                     
                     st.markdown("---")
-                    ac1, ac2 = st.columns(2)
+
+                    schedule_tz = _get_schedule_timezone()
+                    current_dt = _as_schedule_datetime(row.get("scheduled_for")) or datetime.now(schedule_tz)
+
+                    st.markdown("**Reschedule**")
+                    rs_date_col, rs_time_col = st.columns([1, 1])
+                    with rs_date_col:
+                        reschedule_date = st.date_input(
+                            "Date",
+                            value=current_dt.date(),
+                            key=f"reschedule_date_{row['id']}",
+                        )
+                    with rs_time_col:
+                        reschedule_time = st.time_input(
+                            "Time",
+                            value=current_dt.time().replace(second=0, microsecond=0),
+                            key=f"reschedule_time_{row['id']}",
+                        )
+
+                    ac1, ac2, ac3 = st.columns(3)
                     
                     # Track delete/reschedule state for this row
                     delete_key = f"del_{row['id']}"
                     reschedule_key = f"rsc_{row['id']}"
+                    next_slot_key = f"next_{row['id']}"
                     is_deleting = st.session_state.queue_processing.get(delete_key, False)
                     is_rescheduling = st.session_state.queue_processing.get(reschedule_key, False)
+                    is_advancing = st.session_state.queue_processing.get(next_slot_key, False)
                     
                     if ac1.button("Delete", key=delete_key, disabled=is_deleting):
                         st.session_state.queue_processing[delete_key] = True
@@ -668,28 +721,51 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                         st.session_state.queue_processing[delete_key] = False
                         st.rerun()
                     
-                    if ac2.button("Reschedule", key=reschedule_key, disabled=is_rescheduling):
+                    if ac2.button("Save Time", key=reschedule_key, disabled=is_rescheduling):
                         st.session_state.queue_processing[reschedule_key] = True
+                        should_rerun = False
+                        try:
+                            updated_dt = _combine_schedule_datetime(reschedule_date, reschedule_time)
+                            now_in_schedule_tz = datetime.now(schedule_tz)
+                            if updated_dt <= now_in_schedule_tz:
+                                st.error("Please choose a future date and time.")
+                            else:
+                                reschedule_queue_item(row["id"], updated_dt.isoformat())
+                                logger.info("Manually rescheduled queue item #%s to %s", row["id"], updated_dt.isoformat())
+                                st.cache_data.clear()
+                                st.success("✓ Schedule updated!")
+                                should_rerun = True
+                        except Exception as e:
+                            logger.error("Failed to reschedule item #%s: %s", row["id"], e, exc_info=True)
+                            st.error("Failed to reschedule. Please try again.")
+                        st.session_state.queue_processing[reschedule_key] = False
+                        if should_rerun:
+                            st.rerun()
+
+                    if ac3.button("Next Slot", key=next_slot_key, disabled=is_advancing):
+                        st.session_state.queue_processing[next_slot_key] = True
+                        should_rerun = False
                         try:
                             anchor = ui_logic.parse_iso(row.get("scheduled_for")) or ui_logic.get_schedule_start_time(queue_rows)
                             occupied = ui_logic.occupied_schedule_dates(queue_rows)
-                            curr_dt = ui_logic.parse_iso(row.get("scheduled_for"))
+                            curr_dt = _as_schedule_datetime(row.get("scheduled_for"))
                             if curr_dt:
                                 occupied.discard(curr_dt.date().isoformat())
                             future = next_daily_slots(1, start=anchor, occupied_dates=occupied)
                             if future:
                                 reschedule_queue_item(row["id"], future[0].isoformat())
-                                logger.info("Rescheduled queue item #%s to %s", row["id"], future[0].isoformat())
-                                # Clear cache to show updated schedule
+                                logger.info("Moved queue item #%s to next slot %s", row["id"], future[0].isoformat())
                                 st.cache_data.clear()
-                                st.success("✓ Rescheduled!")
+                                st.success("✓ Moved to next slot!")
+                                should_rerun = True
                             else:
                                 st.warning("No available schedule slots found")
                         except Exception as e:
-                            logger.error("Failed to reschedule item #%s: %s", row["id"], e, exc_info=True)
-                            st.error("Failed to reschedule. Please try again.")
-                        st.session_state.queue_processing[reschedule_key] = False
-                        st.rerun()
+                            logger.error("Failed to auto-reschedule item #%s: %s", row["id"], e, exc_info=True)
+                            st.error("Failed to move item. Please try again.")
+                        st.session_state.queue_processing[next_slot_key] = False
+                        if should_rerun:
+                            st.rerun()
                 
                 with col_vid:
                     # Only load video if user wants to see it (performance optimization)
@@ -743,15 +819,18 @@ def render_archived_platform_row(archive_id: int, platform_key: str, label: str,
     if is_success:
         st.success(f"✓ {label}: Success")
     elif is_failed:
-        st.error(f"✗ {label}: {status_text[:40]}...")
+        truncated = str(status_text)
+        suffix = "..." if len(truncated) > 40 else ""
+        st.error(f"✗ {label}: {truncated[:40]}{suffix}")
     else:
         st.info(f"○ {label}: Not attempted")
 
     # Restore button ONLY for failed platforms (not for pending/not attempted)
     if is_failed:
-        is_restoring = st.session_state.queue_processing.get(f"restore_force_{archive_id}_{platform_key}", False)
-        if st.button(f"Restore & Force {label}", key=f"restore_force_{archive_id}_{platform_key}", type="primary", disabled=is_restoring):
-            st.session_state.queue_processing[f"restore_force_{archive_id}_{platform_key}"] = True
+        restore_key = f"restore_force_{archive_id}_{platform_key}"
+        is_restoring = st.session_state.queue_processing.get(restore_key, False)
+        if st.button(f"Restore & Force {label}", key=restore_key, type="primary", disabled=is_restoring):
+            st.session_state.queue_processing[restore_key] = True
             with st.spinner(f"Restoring and queuing {label} upload..."):
                 try:
                     # Restore to queue - returns the new queue item ID
@@ -773,17 +852,19 @@ def render_archived_platform_row(archive_id: int, platform_key: str, label: str,
                             logger.info("Restored archive #%s as queue #%s and queued force upload for platform: %s", archive_id, restored_id, label)
                             st.cache_data.clear()
                             st.success(f"✓ Restored to Queue!")
-                            st.session_state.queue_processing[f"restore_force_{archive_id}_{platform_key}"] = False
+                            st.session_state.queue_processing[restore_key] = False
                             st.rerun()
                         else:
                             logger.warning("Restored but failed to clear platform status for archive #%s, platform: %s", archive_id, label)
                             st.error("Restored but failed to queue force upload")
+                            st.session_state.queue_processing[restore_key] = False
                     else:
                         st.error("Failed to restore. Item may not exist.")
+                        st.session_state.queue_processing[restore_key] = False
                 except Exception as e:
                     logger.error("Failed to restore archive #%s: %s", archive_id, e, exc_info=True)
                     st.error("Failed to restore. Please try again.")
-                    st.session_state.queue_processing[f"restore_force_{archive_id}_{platform_key}"] = False
+                    st.session_state.queue_processing[restore_key] = False
 
 
 def render_archived_row(upload_row: dict, platforms: dict, logger):
@@ -819,9 +900,11 @@ def render_archived_row(upload_row: dict, platforms: dict, logger):
 
             # Show custom title/description if set
             if upload_row.get("title"):
-                st.write(f"Title: {upload_row['title'][:40]}...")
+                t = upload_row["title"]
+                st.write(f"Title: {t[:40]}{'...' if len(t) > 40 else ''}")
             if upload_row.get("description"):
-                st.write(f"Desc: {upload_row['description'][:40]}...")
+                d = upload_row["description"]
+                st.write(f"Desc: {d[:40]}{'...' if len(d) > 40 else ''}")
 
             # Platform status section with restore buttons
             st.markdown("**Platforms:**")

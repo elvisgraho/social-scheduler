@@ -140,8 +140,11 @@ def render_accounts_tab(logger):
             if st.button("Save Credentials", key="ig_creds_btn", disabled=is_save_creds):
                 st.session_state.accounts_processing["ig_save_creds"] = True
                 set_config("insta_user", ig_user)
-                set_config("insta_pass", ig_pass)
-                if ig_user and ig_pass:
+                # Only overwrite the stored password when the user actually typed one;
+                # an empty field means "leave the existing password unchanged".
+                if ig_pass:
+                    set_config("insta_pass", ig_pass)
+                if ig_user:
                     logger.info("Instagram credentials saved")
                     st.success("✓ Saved!")
                 else:
@@ -172,7 +175,7 @@ def render_accounts_tab(logger):
     
     with st.form("tiktok_form"):
         st.caption("Paste sessionid")
-        tt_input = st.text_area("Session", value=get_config("tiktok_sessionid", ""), height=60, key="tt_session")
+        tt_input = st.text_area("Session", value=get_config("tiktok_session_id", ""), height=60, key="tt_session")
         
         # Disable form submit while processing
         is_processing = st.session_state.accounts_processing.get("tt_save", False)

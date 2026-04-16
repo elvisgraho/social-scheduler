@@ -137,10 +137,20 @@ def _ensure_uploads_table(conn: sqlite3.Connection) -> None:
             uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
             title TEXT,
             description TEXT,
-            platform_logs TEXT
+            platform_logs TEXT,
+            enabled_platforms TEXT,
+            platform_overrides TEXT
         )
         """
     )
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(uploads)")}
+    upload_columns = {
+        "enabled_platforms": "ALTER TABLE uploads ADD COLUMN enabled_platforms TEXT",
+        "platform_overrides": "ALTER TABLE uploads ADD COLUMN platform_overrides TEXT",
+    }
+    for column, ddl in upload_columns.items():
+        if column not in existing:
+            conn.execute(ddl)
     conn.commit()
 
 
@@ -157,8 +167,16 @@ def _migrate_uploaded_rows(conn: sqlite3.Connection) -> None:
             row_dict = dict(row)
             conn.execute(
                 """
-                INSERT INTO uploads (queue_id, file_path, title, description, platform_logs)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO uploads (
+                    queue_id,
+                    file_path,
+                    title,
+                    description,
+                    platform_logs,
+                    enabled_platforms,
+                    platform_overrides
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row_dict.get("id"),
@@ -166,6 +184,8 @@ def _migrate_uploaded_rows(conn: sqlite3.Connection) -> None:
                     row_dict.get("title"),
                     row_dict.get("description"),
                     row_dict.get("platform_logs"),
+                    row_dict.get("enabled_platforms"),
+                    row_dict.get("platform_overrides"),
                 ),
             )
             conn.execute("DELETE FROM queue WHERE id = ?", (row_dict.get("id"),))
@@ -427,8 +447,17 @@ def archive_uploaded_item(queue_row: Dict[str, Any], platform_logs: Optional[Dic
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO uploads (queue_id, file_path, uploaded_at, title, description, platform_logs)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO uploads (
+                queue_id,
+                file_path,
+                uploaded_at,
+                title,
+                description,
+                platform_logs,
+                enabled_platforms,
+                platform_overrides
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 queue_row.get("id"),
@@ -437,6 +466,8 @@ def archive_uploaded_item(queue_row: Dict[str, Any], platform_logs: Optional[Dic
                 queue_row.get("title"),
                 queue_row.get("description"),
                 logs_json,
+                queue_row.get("enabled_platforms"),
+                queue_row.get("platform_overrides"),
             ),
         )
         conn.execute("DELETE FROM queue WHERE id = ?", (queue_row.get("id"),))
@@ -468,6 +499,15 @@ def get_uploaded_count() -> int:
     """Get the total count of uploaded items."""
     with get_conn() as conn:
         row = conn.execute("SELECT COUNT(*) AS cnt FROM uploads").fetchone()
+        return row["cnt"] if row else 0
+
+
+def get_pending_count() -> int:
+    """Get the count of active (pending/retry) queue items without fetching all rows."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM queue WHERE status IN ('pending', 'retry')"
+        ).fetchone()
         return row["cnt"] if row else 0
 
 
@@ -554,8 +594,18 @@ def restore_archived_to_queue(upload_id: int) -> int:
             # Insert back into queue with 'failed' status
             cursor = conn.execute(
                 """
-                INSERT INTO queue (file_path, scheduled_for, title, description, platform_logs, status, attempts)
-                VALUES (?, ?, ?, ?, ?, 'failed', 0)
+                INSERT INTO queue (
+                    file_path,
+                    scheduled_for,
+                    title,
+                    description,
+                    platform_logs,
+                    enabled_platforms,
+                    platform_overrides,
+                    status,
+                    attempts
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', 0)
                 """,
                 (
                     upload_dict.get("file_path"),
@@ -563,6 +613,8 @@ def restore_archived_to_queue(upload_id: int) -> int:
                     upload_dict.get("title"),
                     upload_dict.get("description"),
                     upload_dict.get("platform_logs"),
+                    upload_dict.get("enabled_platforms"),
+                    upload_dict.get("platform_overrides"),
                 ),
             )
             new_queue_id = cursor.lastrowid or 0

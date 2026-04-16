@@ -49,18 +49,18 @@ render_header()
 # Load data with caching to reduce database calls
 from src.database import get_queue, get_uploaded_count, get_uploaded_items
 
-@st.cache_data(ttl=2, show_spinner=False)
+@st.cache_data(ttl=8, show_spinner=False)
 def get_queue_cached():
-    """Cache queue data for 2 seconds to reduce DB load."""
+    """Cache queue data for 8 seconds to reduce DB load on Pi."""
     try:
         return get_queue()
     except Exception as e:
         logger.error("Failed to fetch queue data: %s", e, exc_info=True)
         return []
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def get_uploaded_data_cached():
-    """Cache uploaded data for 5 seconds."""
+    """Cache uploaded data for 15 seconds — archive changes infrequently."""
     try:
         return get_uploaded_count(), get_uploaded_items(200)
     except Exception as e:

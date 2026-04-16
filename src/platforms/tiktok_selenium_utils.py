@@ -1,155 +1,182 @@
 import time
 from selenium.common.exceptions import WebDriverException
 
-def dismiss_shadow_cookies(driver):
+
+def dismiss_shadow_cookies(driver) -> bool:
     """
-    FIXED: 
-    1. Removed strict 'offsetWidth' checks that caused failures on loading elements.
-    2. Uses 'textContent' fallback to ensure text is read even if hidden.
-    3. Traverses deep Shadow DOMs without early aborting.
+    Dismiss TikTok's cookie/consent banner.
+
+    Key fixes vs the old version:
+    - Removed `offsetParent !== null` check.  TikTok's banner is position:fixed
+      so offsetParent is ALWAYS null for fixed elements — the old check silently
+      prevented every click.
+    - Targets `tiktok-cookie-banner` custom element directly before doing the
+      generic shadow-DOM walk (faster, more reliable).
+    - Uses getComputedStyle for visibility instead of the broken offsetParent heuristic.
+    - Extended button-text list to match current TikTok copy.
     """
     try:
-        driver.execute_script("""
-            function clickShadowCookies(root) {
-                // 1. Try to find and click buttons in the current root
-                try {
-                    // Look for standard buttons and elements acting as buttons
-                    let buttons = root.querySelectorAll('button, div[role="button"], input[type="button"], a[role="button"]');
-                    
-                    buttons.forEach(b => {
-                        // Use textContent as fallback if innerText is empty (hidden elements)
-                        let txt = (b.innerText || b.textContent || "").toLowerCase().trim();
+        clicked = driver.execute_script("""
+            const ACCEPT_PHRASES = [
+                'allow all cookies',
+                'allow all',
+                'accept all cookies',
+                'accept all',
+                'agree to all',
+                'decline optional cookies',
+                'decline optional',
+                'reject optional',
+            ];
 
-                        // Check for common keywords
-                        if (txt.includes('allow all') ||
-                            txt.includes('accept all') ||
-                            txt.includes('accept cookies') ||
-                            txt.includes('agree') ||
-                            txt.includes('decline optional') ||
-                            txt.includes('reject optional')) {
+            function isVisible(el) {
+                const s = window.getComputedStyle(el);
+                return s.display !== 'none'
+                    && s.visibility !== 'hidden'
+                    && s.opacity !== '0'
+                    && parseFloat(s.opacity) > 0;
+            }
 
-                            // Check visibility: offsetParent is the standard check for 'is reachable'
-                            // We do NOT check offsetWidth/Height as it fails on animating elements
-                            if (b.offsetParent !== null) {
-                                b.click();
-                                console.log('Shadow cookie clicked:', txt);
-                            }
-                        }
-                    });
-                } catch(e) { console.error(e); }
-
-                // 2. Traverse into Shadow Roots
-                try {
-                    // Optimized: specific query is impossible for shadow roots, so we must iterate
-                    // heavily optimized for the Pi by not creating new variables inside the loop
-                    let all = root.querySelectorAll('*');
-                    for (let i = 0; i < all.length; i++) {
-                        if (all[i].shadowRoot) {
-                            clickShadowCookies(all[i].shadowRoot);
+            function tryClickIn(root) {
+                const candidates = root.querySelectorAll(
+                    'button, [role="button"], input[type="button"], a[role="button"]'
+                );
+                for (const el of candidates) {
+                    const txt = (el.textContent || el.innerText || '').toLowerCase().trim();
+                    if (ACCEPT_PHRASES.some(p => txt === p || txt.includes(p))) {
+                        if (isVisible(el)) {
+                            el.click();
+                            console.log('[TIKTOK_BOT] Cookie clicked:', txt);
+                            return true;
                         }
                     }
-                } catch(e) {}
+                }
+                // Recurse into shadow roots
+                for (const el of root.querySelectorAll('*')) {
+                    if (el.shadowRoot && tryClickIn(el.shadowRoot)) return true;
+                }
+                return false;
             }
-            
-            // Start the process
-            clickShadowCookies(document);
+
+            // 1. Check TikTok's specific custom element first (fastest path)
+            const banner = document.querySelector('tiktok-cookie-banner');
+            if (banner) {
+                if (banner.shadowRoot && tryClickIn(banner.shadowRoot)) return true;
+                if (tryClickIn(banner)) return true;
+            }
+
+            // 2. Generic document walk
+            return tryClickIn(document);
         """)
-    except WebDriverException: pass
+        if clicked:
+            time.sleep(0.5)
+            return True
+    except WebDriverException:
+        pass
+    return False
+
 
 def handle_standard_popups(driver) -> bool:
     """
-    Optimized: Moves the Loop and XPath search entirely to JS.
-    RPi Benefit: Replaces multiple HTTP requests with 1 single request.
+    Dismiss common TikTok interstitial popups in one JS round-trip.
+
+    Targets (case-insensitive, visible elements only):
+      - "Got it" / "OK" / "Okay" buttons
+      - "Confirm" buttons / divs
+      - Generic close (×) icons on floating dialogs
     """
     try:
-        did_dismiss = driver.execute_script("""
-            var xpathTargets = [
-                "//button[contains(translate(., 'C', 'c'), 'confirm')]", 
-                "//button[contains(translate(., 'G', 'g'), 'got it')]",
-                "//button[contains(translate(., 'O', 'o'), 'okay')]",
-                "//div[@role='button'][contains(., 'Confirm')]" // Edge Case: Divs acting as buttons
+        dismissed = driver.execute_script("""
+            const TARGETS = [
+                "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'got it')]",
+                "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'okay')]",
+                "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), ' ok')]",
+                "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'confirm')]",
+                "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]",
+                "//div[@role='button'][contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'confirm')]",
             ];
-            
-            var dismissed = false;
-            
-            xpathTargets.forEach(xp => {
+
+            let dismissed = false;
+            for (const xp of TARGETS) {
                 try {
-                    var result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-                    for (var i = 0; i < result.snapshotLength; i++) {
-                        var el = result.snapshotItem(i);
-                        // Edge Case: Check visibility via offsetParent or computed style
-                        var style = window.getComputedStyle(el);
-                        if (el.offsetParent !== null && style.display !== 'none' && style.visibility !== 'hidden') {
+                    const result = document.evaluate(
+                        xp, document, null,
+                        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
+                    );
+                    for (let i = 0; i < result.snapshotLength; i++) {
+                        const el = result.snapshotItem(i);
+                        const s = window.getComputedStyle(el);
+                        if (s.display !== 'none' && s.visibility !== 'hidden') {
                             el.click();
                             dismissed = true;
                         }
                     }
                 } catch(e) {}
-            });
+            }
             return dismissed;
         """)
-        if did_dismiss:
+        if dismissed:
             time.sleep(0.5)
             return True
-    except WebDriverException: pass
+    except WebDriverException:
+        pass
     return False
 
-def handle_continue_to_post(driver, logFunction) -> bool:
+
+def handle_continue_to_post(driver, log_fn) -> bool:
     """
-    Optimized: Single JS call to check, log (via return), and click.
-    Fixed: Added race condition check to ensure element still exists before clicking.
+    Click the "Post now" / "Continue to post" confirmation modal if visible.
+    Single JS round-trip with race-condition protection.
     """
     try:
-        # Returns string "clicked" if successful, else null
         result = driver.execute_script("""
-            var btns = document.evaluate("//button[contains(., 'Post now')]", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-            for (var i = 0; i < btns.snapshotLength; i++) {
-                var btn = btns.snapshotItem(i);
-                // Enhanced visibility check with race condition protection
-                if (btn && btn.isConnected && btn.offsetParent !== null) {
-                    try {
-                        btn.click();
-                        return "clicked";
-                    } catch(e) {
-                        // Element was removed during click attempt
-                        console.error('Click failed:', e);
+            const xpaths = [
+                "//button[contains(normalize-space(.), 'Post now')]",
+                "//button[contains(normalize-space(.), 'Continue to post')]",
+            ];
+            for (const xp of xpaths) {
+                const snap = document.evaluate(
+                    xp, document, null,
+                    XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
+                );
+                for (let i = 0; i < snap.snapshotLength; i++) {
+                    const btn = snap.snapshotItem(i);
+                    if (btn && btn.isConnected && btn.offsetParent !== null) {
+                        try { btn.click(); return "clicked"; } catch(e) {}
                     }
                 }
             }
             return null;
         """)
-        
         if result == "clicked":
-            if logFunction:
-                logFunction(driver, "Found 'Continue to post?' modal - Clicking 'Post now'")
+            if log_fn:
+                log_fn(driver, "Found 'Continue to post?' modal — clicking 'Post now'")
             time.sleep(2)
             return True
-    except WebDriverException: pass
+    except WebDriverException:
+        pass
     return False
 
-def handle_are_you_sure_exit(driver, logFunction) -> bool:
+
+def handle_are_you_sure_exit(driver, log_fn) -> bool:
     """
-    Optimized: Broadened search to include H2/H3 and aria-labels.
+    Dismiss the "Are you sure you want to exit?" / "Discard post" modal
+    by clicking Cancel / Keep editing.
     """
-    did_dismiss = False
     try:
         dismissed = driver.execute_script("""
-            // RPi Opt: Get headers by tag is fast
-            var headers = document.querySelectorAll('h1, h2, h3, [role="heading"]');
-            for (var i = 0; i < headers.length; i++) {
-                var txt = headers[i].innerText.toLowerCase();
-                // Edge Case: Text variations
+            const headers = document.querySelectorAll('h1, h2, h3, [role="heading"]');
+            for (const h of headers) {
+                const txt = (h.textContent || h.innerText || '').toLowerCase();
                 if (txt.includes('sure you want to exit') || txt.includes('discard post')) {
-                    var dialog = headers[i].closest('div[role="dialog"]') || headers[i].closest('.modal') || headers[i].parentNode.parentNode;
-                    if (dialog) {
-                        var buttons = dialog.querySelectorAll('button');
-                        for (var j = 0; j < buttons.length; j++) {
-                            var bTxt = buttons[j].innerText.toLowerCase();
-                            // Edge Case: "Keep editing" vs "Cancel"
-                            if (bTxt.includes('cancel') || bTxt.includes('keep editing')) {
-                                buttons[j].click();
-                                return true;
-                            }
+                    const dialog = h.closest('[role="dialog"]')
+                                || h.closest('.modal')
+                                || h.parentNode.parentNode;
+                    if (!dialog) continue;
+                    for (const btn of dialog.querySelectorAll('button')) {
+                        const bTxt = (btn.textContent || btn.innerText || '').toLowerCase();
+                        if (bTxt.includes('cancel') || bTxt.includes('keep editing')) {
+                            btn.click();
+                            return true;
                         }
                     }
                 }
@@ -157,12 +184,54 @@ def handle_are_you_sure_exit(driver, logFunction) -> bool:
             return false;
         """)
         if dismissed:
-            if logFunction:
-                logFunction(driver, "Dismissed 'Exit' modal")
-            did_dismiss = True
+            if log_fn:
+                log_fn(driver, "Dismissed 'Exit' modal")
             time.sleep(1)
-    except WebDriverException: pass
-    return did_dismiss
+            return True
+    except WebDriverException:
+        pass
+    return False
 
 
+def find_file_input(driver):
+    """
+    Locate the file input on TikTok's upload page.
 
+    TikTok embeds its upload form inside an <iframe>.  This function:
+      1. Tries the main document first (handles any future layout changes).
+      2. Scans all iframes, staying inside the one that contains the input.
+
+    Returns (input_element, in_iframe: bool) or (None, False) on failure.
+    Uses a single JS call per iframe to minimise Pi round-trips.
+    """
+    # 1. Main document (quick check — unlikely but free)
+    try:
+        el = driver.find_element("xpath", "//input[@type='file']")
+        if el:
+            return el, False
+    except Exception:
+        pass
+
+    # 2. Iframe scan — stay inside the iframe that has the input
+    try:
+        iframes = driver.find_elements("tag name", "iframe")
+    except Exception:
+        return None, False
+
+    for frame in iframes:
+        try:
+            driver.switch_to.frame(frame)
+            # Single JS query — faster than XPath over the wire
+            el = driver.execute_script(
+                "return document.querySelector('input[type=\"file\"]');"
+            )
+            if el:
+                return el, True
+            driver.switch_to.default_content()
+        except Exception:
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+
+    return None, False
