@@ -302,6 +302,16 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
     
     # Upload section
     st.markdown("### **Upload**")
+
+    # Show messages that were stored before a st.rerun() (rerun discards pending renders)
+    if _flash := st.session_state.pop("_queue_flash", None):
+        if _flash["type"] == "success":
+            st.success(_flash["text"])
+        elif _flash["type"] == "error":
+            st.error(_flash["text"])
+        elif _flash["type"] == "info":
+            st.info(_flash["text"])
+
     uploaded_files = st.file_uploader(
         "Drop videos (mp4, mov)",
         label_visibility="hidden",
@@ -390,10 +400,9 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                                         if count > 0:
                                             logger.info("Queued video for %s (regular queue)", slots[0].isoformat())
                                             st.session_state["queued_video_sig_regular"] = file_sig_regular
-                                            # Clear the processing state on success
                                             st.session_state.queue_processing["queue_video_regular"] = False
+                                            st.session_state["_queue_flash"] = {"type": "success", "text": f"✓ Video queued for {slots[0].strftime('%b %d, %Y at %H:%M')}!"}
                                             st.cache_data.clear()
-                                            st.success(f"✓ Video queued for {slots[0].strftime('%b %d, %Y at %H:%M')}!")
                                             st.rerun()
                                         else:
                                             st.error("Failed to queue video. Check logs for details.")
@@ -503,11 +512,9 @@ def render_queue_tab(queue_rows, uploaded_rows, UPLOAD_DIR, logger):
                                     if count > 0:
                                         logger.info("Queued custom video for %s", custom_datetime.isoformat())
                                         st.session_state["queued_video_sig"] = file_sig
-                                        # Clear the processing state on success
                                         st.session_state.queue_processing["queue_video"] = False
-                                        # Clear cache to show updated queue
+                                        st.session_state["_queue_flash"] = {"type": "success", "text": f"✓ Video queued for {custom_datetime.strftime('%b %d, %Y at %H:%M')}!"}
                                         st.cache_data.clear()
-                                        st.success(f"✓ Video queued for {custom_datetime.strftime('%b %d, %Y at %H:%M')}!")
                                         st.rerun()
                                     else:
                                         st.error("Failed to queue video. Check logs for details.")

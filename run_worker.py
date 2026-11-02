@@ -31,6 +31,7 @@ from src.database import (
 )
 from src.logging_utils import init_logging
 from src.logging_utils import log_once
+from src.upload_outcomes import PUBLISH_PENDING, needs_review
 from src.notifier import send_telegram_message
 from src.platform_registry import get_platforms
 from src.platforms import instagram as instagram_platform
@@ -278,7 +279,7 @@ def process_video(video: dict, forced_platforms: set[str] | None = None, is_forc
     # 4. File Integrity Check
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
         msg = f"File missing or empty for queue #{queue_id}: {file_path}"
-        update_queue_status(queue_id, "failed", msg, {"error": msg})
+        update_queue_status(queue_id, "failed", msg, {**previous_logs, "error": msg})
         _notify(msg)
         return
 
@@ -345,6 +346,12 @@ def process_video(video: dict, forced_platforms: set[str] | None = None, is_forc
 
         # SKIP if already succeeded in a previous attempt
         prev_status = current_logs.get(key, "")
+        if needs_review(prev_status):
+            failures.append((label, str(prev_status)))
+            if staged_uploads_enabled and idx == 0 and key == test_platform_key:
+                staged_test_failed = True
+            logger.warning("Skipping %s for #%s: submission needs review.", label, queue_id)
+            continue
         if "success" in str(prev_status).lower() or "uploaded id" in str(prev_status).lower():
             logger.info("Skipping %s for #%s (already uploaded).", label, queue_id)
             successes.append(label)
@@ -411,11 +418,19 @@ def process_video(video: dict, forced_platforms: set[str] | None = None, is_forc
         try:
             if key == "youtube":
                 ok, message = uploader(file_path, platform_title, platform_description)
+            elif key == "tiktok":
+                def mark_tiktok_submission():
+                    current_logs[key] = PUBLISH_PENDING
+                    update_queue_status(queue_id, "processing", None, current_logs)
+
+                ok, message = uploader(
+                    file_path, platform_description, before_publish=mark_tiktok_submission
+                )
             else:
                 ok, message = uploader(file_path, platform_description)
         except Exception as e:
             ok = False
-            message = str(e)
+            message = PUBLISH_PENDING if needs_review(current_logs.get(key)) else str(e)
 
         current_logs[key] = message
 

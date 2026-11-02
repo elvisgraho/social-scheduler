@@ -1,21 +1,27 @@
 import json
+import shutil
+import subprocess
+import tempfile
+from datetime import datetime
+from pathlib import Path
 from typing import Tuple
+from zoneinfo import ZoneInfo
 
+import imageio_ffmpeg
 from instagrapi import Client
 from instagrapi.exceptions import (
     ChallengeRequired,
+    LoginRequired,
     TwoFactorRequired,
 )
 from pydantic import ValidationError
 
 from src.logging_utils import init_logging
 from src.database import get_config, set_account_state, set_config
+from src.upload_outcomes import NEEDS_REVIEW
 
 SESSION_KEY = "insta_session"
 SESSION_ID_KEY = "insta_sessionid"
-
-# Updated User-Agent to version 410 with German locale (de_DE) to match your IP
-IG_USER_AGENT = "Instagram 410.1.0.63.71 Android (34/14; 320dpi; 720x1438; Xiaomi/Redmi; 23108RN04Y; gust; mt6768; de_DE; 846519237)"
 
 logger = init_logging("instagram")
 
@@ -61,12 +67,13 @@ def _extract_sessionid(raw: str) -> str:
     return raw
 
 def _apply_german_settings(cl: Client) -> None:
-    """Enforce Germany (Hessen) settings to match IP and avoid challenges."""
-    cl.set_user_agent(IG_USER_AGENT)
+    """Keep the configured locale and use instagrapi's supported app profile."""
     cl.set_country("DE")
     cl.set_country_code(49)
     cl.set_locale("de_DE")
-    cl.set_timezone_offset(3600)  # UTC+1 (Winter Time)
+    offset = datetime.now(ZoneInfo("Europe/Berlin")).utcoffset()
+    cl.set_timezone_offset(int(offset.total_seconds()), timezone_name="Europe/Berlin")
+    cl.set_user_agent()
 
 def _load_settings(cl: Client) -> bool:
     """Load saved session settings including device UUIDs."""
@@ -85,7 +92,8 @@ def _load_settings(cl: Client) -> bool:
 
 def _initialize_client() -> Client:
     """Initialize client with proper delays and location settings."""
-    cl = Client()
+    # Refresh app version/Bloks hash while retaining restored hardware and UUIDs.
+    cl = Client(override_app_version=True)
     # Delay between requests (1-3 seconds as recommended by instagrapi docs)
     cl.delay_range = [1, 3]
     _apply_german_settings(cl)
@@ -156,99 +164,66 @@ def _login(cl: Client, relogin: bool = False) -> Tuple[bool, str]:
         set_account_state("instagram", False, err_str)
         return False, err_str
 
+def _upload_reel(client: Client, video_path: str, caption: str):
+    """Supply an FFmpeg thumbnail so standard MP4 uploads do not need MoviePy."""
+    video = Path(video_path).resolve()
+    ffmpeg = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
+    with tempfile.TemporaryDirectory(prefix="scheduler-reel-") as directory:
+        thumbnail = Path(directory) / "thumbnail.jpg"
+        result = subprocess.run(
+            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(video), "-frames:v", "1", str(thumbnail)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if result.returncode or not thumbnail.is_file():
+            raise RuntimeError(f"Could not generate Reel thumbnail: {result.stderr[-300:]}")
+        return client.clip_upload(
+            video, caption=(caption or "")[:2200], thumbnail=thumbnail,
+            show_preview_in_feed=False,
+        )
+
+
 def upload(video_path: str, caption: str) -> Tuple[bool, str]:
     cl = _initialize_client()
-
-    # Load saved settings (includes device UUIDs)
-    using_session = _load_settings(cl)
+    _load_settings(cl)
     ok, msg = _login(cl)
     if not ok:
         return False, msg
 
-    def attempt_upload(client):
-        safe_caption = caption or ""
-        if len(safe_caption) > 2200:
-            safe_caption = safe_caption[:2200]
-            try:
-                safe_caption = safe_caption.encode('utf-8', errors='ignore').decode('utf-8')
-            except Exception:
-                pass
-
-        return client.clip_upload(
-            video_path,
-            caption=safe_caption,
-            extra_data={
-                "clips_share_preview_to_feed": "0",
-                "share_to_feed": "0"
-            }
-        )
-
-    try:
-        media = attempt_upload(cl)
-
-        if getattr(media, "product_type", "").lower() != "clips":
-            err = "Upload completed but returned non-Reel media."
-            set_account_state("instagram", False, err)
-            return False, err
-
-        _store_settings(cl)
-        return True, f"Uploaded PK: {media.pk}"
-
-    except ValidationError as e:
-        error_msg = str(e)
-        if "audio_filter_infos" in error_msg or "clips_metadata" in error_msg:
-            logger.warning(f"Instagram response parsing failed (Known instagrapi Library Bug). Upload likely succeeded. Error: {e}")
+    for attempt in range(2):
+        try:
+            media = _upload_reel(cl, video_path, caption)
+            if getattr(media, "product_type", "").lower() != "clips" or not getattr(media, "pk", None):
+                return False, f"{NEEDS_REVIEW} Instagram did not return a confirmed Reel ID. Check the account before retrying."
+            _store_settings(cl)
             set_account_state("instagram", True, None)
-            return True, "Upload successful (Response parsing error ignored)"
-        else:
-            logger.error(f"Instagram validation error (Unknown): {e}")
-            set_account_state("instagram", False, f"Validation error: {error_msg[:200]}")
-            return False, f"Upload failed: {error_msg[:200]}"
+            return True, f"Uploaded PK: {media.pk}"
+        except LoginRequired:
+            # Only an explicit expired-login error permits a second upload attempt.
+            if attempt:
+                msg = "Instagram login expired again. Reconnect the account before retrying."
+                set_account_state("instagram", False, msg)
+                return False, msg
+            cl = _initialize_client()
+            _load_settings(cl)
+            ok, msg = _login(cl, relogin=True)
+            if not ok:
+                return False, msg
+        except (ChallengeRequired, TwoFactorRequired):
+            msg = "Instagram challenge/2FA required. Approve on your device, then retry."
+            set_account_state("instagram", False, msg)
+            return False, msg
+        except ValidationError:
+            # Response parsing cannot establish whether Instagram published the Reel.
+            logger.warning("Instagram returned an unreadable upload response; manual review required.")
+            return False, f"{NEEDS_REVIEW} Instagram returned an unreadable upload response. Check the account before retrying."
+        except Exception as exc:
+            # A generic error is not evidence of an expired session. Do not re-upload.
+            msg = _format_error(exc)
+            logger.error("Instagram upload stopped: %s", msg)
+            return False, msg
+    raise AssertionError("Unreachable upload retry state")
 
-    except Exception as exc:
-        err_str = _format_error(exc)
-
-        is_auth_error = any(x in err_str.lower() for x in ["login", "challenge", "unauthorized", "http 200"])
-
-        if using_session or is_auth_error:
-            logger.warning(f"Instagram upload failed ({err_str}). Retrying with relogin...")
-            try:
-                username, password = _credentials()
-                if not username or not password:
-                    raise Exception("No credentials for retry.")
-
-                # Create new client but load old settings to preserve device UUIDs
-                cl = _initialize_client()
-                _load_settings(cl)  # Load old device UUIDs
-
-                # Use relogin=True to preserve device identity
-                cl.login(username, password, relogin=True)
-                _store_settings(cl)
-
-                media = attempt_upload(cl)
-                set_account_state("instagram", True, None)
-                return True, f"Uploaded PK: {media.pk} (Retry)"
-
-            except ValidationError as retry_e:
-                retry_err_msg = str(retry_e)
-                if "audio_filter_infos" in retry_err_msg or "clips_metadata" in retry_err_msg:
-                    logger.warning("Retry upload likely succeeded (Known parsing bug ignored).")
-                    set_account_state("instagram", True, None)
-                    return True, "Upload successful (Retry - Response parsing error ignored)"
-                else:
-                    logger.error(f"Retry validation error: {retry_e}")
-                    set_account_state("instagram", False, f"Retry failed: {retry_err_msg[:200]}")
-                    return False, f"Retry failed: {retry_err_msg[:200]}"
-            except Exception as retry_exc:
-                final_err = f"Retry failed: {_format_error(retry_exc)}"
-                set_account_state("instagram", False, final_err)
-                return False, final_err
-
-        if "ffmpeg" in err_str.lower() or "no such file" in err_str.lower():
-            err_str += " (Ensure FFMPEG is installed)"
-
-        set_account_state("instagram", False, err_str)
-        return False, err_str
 
 def verify_login() -> Tuple[bool, str]:
     cl = _initialize_client()

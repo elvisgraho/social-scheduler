@@ -3,3 +3,5 @@ data/
 .claude
 .codex
 *.mp4
+.venv/
+.playwright-browsers/

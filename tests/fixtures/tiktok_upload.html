@@ -1,0 +1,25 @@
+
+<input type="file" style="display:none">
+<button id="cancel" hidden>Cancel</button>
+<button aria-label="Replace" hidden>Replace</button>
+<div class="public-DraftEditor-content" contenteditable="true">filename.mp4</div>
+<button data-e2e="post_video_button" disabled>Post</button>
+<div id="result"></div>
+<script>
+window.posts = 0;
+document.querySelector('input').onchange = () => {
+  document.querySelector('#cancel').hidden = false;
+  setTimeout(() => {
+    document.querySelector('#cancel').hidden = true;
+    document.querySelector('[aria-label="Replace"]').hidden = false;
+    document.querySelector('[data-e2e]').disabled = false;
+  }, 150);
+};
+document.querySelector('[data-e2e]').onclick = () => {
+  window.posts++;
+  document.querySelector('#result').innerHTML = '<button id="confirm">Post now</button>';
+  document.querySelector('#confirm').onclick = () => {
+    document.querySelector('#result').textContent = 'Post published';
+  };
+};
+</script>
